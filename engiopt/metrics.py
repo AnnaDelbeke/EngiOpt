@@ -29,25 +29,7 @@ else:
     multiprocessing.set_start_method("spawn", force=True)
 
 
-def apply_importance_weights(x: np.ndarray, ref: np.ndarray) -> np.ndarray:
-    """Weight each dimension by sqrt(variance) computed from a reference set.
-
-    This makes distance calculations sensitive to dimensions that vary more,
-    whether those dimensions are pixels, latent codes, or any other features.
-
-    Args:
-        x: Array of shape (n, d) to be weighted.
-        ref: Reference array of shape (m, d) used to compute per-dimension variance.
-
-    Returns:
-        Weighted copy of x with shape (n, d).
-    """
-    var = np.var(ref, axis=0)
-    weights = np.sqrt(var + 1e-12)
-    return x * weights
-
-
-def mmd(x: np.ndarray, y: np.ndarray, sigma: float | None = 1.0, importance_weighted: bool = False) -> float:
+def mmd(x: np.ndarray, y: np.ndarray, sigma: float | None = 1.0) -> float:
     """Compute the Maximum Mean Discrepancy (MMD) between two sets of samples.
 
     Args:
@@ -55,19 +37,12 @@ def mmd(x: np.ndarray, y: np.ndarray, sigma: float | None = 1.0, importance_weig
         y: Array of shape (m, ...) for dataset/reference designs (or latent codes).
         sigma: Bandwidth parameter for the Gaussian kernel. If None, uses median heuristic
             on the reference data y only (so sigma is consistent across different generators).
-        importance_weighted: If True, weight each dimension by sqrt(variance) of y
-            before computing distances. Useful for latent spaces where some
-            dimensions are more informative than others.
 
     Returns:
         float: The MMD value.
     """
     x_flat = x.reshape(x.shape[0], -1)
     y_flat = y.reshape(y.shape[0], -1)
-
-    if importance_weighted:
-        x_flat = apply_importance_weights(x_flat, y_flat)
-        y_flat = apply_importance_weights(y_flat, y_flat)
 
     if sigma is None:
         sigma = compute_median_sigma(y_flat)
@@ -79,7 +54,7 @@ def mmd(x: np.ndarray, y: np.ndarray, sigma: float | None = 1.0, importance_weig
     return float(k_xx.mean() + k_yy.mean() - 2 * k_xy.mean())
 
 
-def dpp_diversity(x: np.ndarray, sigma: float | None = None, importance_weighted: bool = False) -> float:
+def dpp_diversity(x: np.ndarray, sigma: float | None = None) -> float:
     """Compute the Determinantal Point Process (DPP) diversity for a set of samples.
 
     Uses the log-determinant for numerical stability (raw determinant underflows
@@ -93,16 +68,11 @@ def dpp_diversity(x: np.ndarray, sigma: float | None = None, importance_weighted
         x: Array of shape (n, ...) for generated designs (or latent codes).
         sigma: Bandwidth parameter for the Gaussian kernel. If None, uses median
             heuristic on x (recommended for DPP).
-        importance_weighted: If True, weight each dimension by sqrt(variance) of x
-            before computing distances.
 
     Returns:
         float: The log-determinant of the DPP kernel matrix (higher = more diverse).
     """
     x_flat = x.reshape(x.shape[0], -1)
-
-    if importance_weighted:
-        x_flat = apply_importance_weights(x_flat, x_flat)
 
     if sigma is None:
         sigma = compute_median_sigma(x_flat)
@@ -150,6 +120,83 @@ def compute_median_sigma(x: np.ndarray, y: np.ndarray | None = None) -> float:
 
     sigma = np.sqrt(np.median(dists) / 2) if len(dists) > 0 else 1.0
     return max(sigma, 1e-6)
+
+
+def conditional_mmd(
+    x: np.ndarray,
+    y: np.ndarray,
+    conditions: np.ndarray,
+    n_bins: int = 5,
+    sigma: float | None = None,
+) -> dict[str, float]:
+    """Compute MMD per condition bin, then average.
+
+    For each condition dimension, samples are grouped into quantile-based bins.
+    MMD is computed within each bin between the generated and dataset samples
+    that share that bin. The per-bin MMDs are averaged (weighted by bin size)
+    to produce a single conditional MMD value per condition dimension, plus
+    an overall average across all condition dimensions.
+
+    Args:
+        x: Generated designs/latent codes, shape (n, d).
+        y: Dataset designs/latent codes, shape (n, d). Must be same length as x
+            (paired with the same sampled conditions).
+        conditions: Condition values, shape (n, n_conds). Each column is one
+            condition dimension.
+        n_bins: Number of quantile bins per condition dimension. Default 5.
+        sigma: Bandwidth for Gaussian kernel. If None, uses median heuristic
+            on the full y set (shared across bins for consistency).
+
+    Returns:
+        Dictionary with keys:
+            - "cond_mmd": Overall conditional MMD (average across condition dims).
+            - "cond_mmd_{name}": Per-condition-dimension conditional MMD, where
+              name is "dim0", "dim1", etc.
+            - "cond_mmd_sigma": The sigma used.
+    """
+    x_flat = x.reshape(x.shape[0], -1)
+    y_flat = y.reshape(y.shape[0], -1)
+    conditions = np.atleast_2d(conditions)
+    if conditions.shape[0] != x_flat.shape[0]:
+        conditions = conditions.T
+    n_samples, n_conds = conditions.shape
+
+    # Resolve sigma once from full reference set
+    if sigma is None:
+        sigma = compute_median_sigma(y_flat)
+
+    per_cond_mmds: list[float] = []
+    result: dict[str, float] = {"cond_mmd_sigma": sigma}
+
+    for c in range(n_conds):
+        cond_vals = conditions[:, c]
+        # Quantile-based bin edges
+        bin_edges = np.quantile(cond_vals, np.linspace(0, 1, n_bins + 1))
+        bin_indices = np.digitize(cond_vals, bin_edges[1:-1])  # 0..n_bins-1
+
+        bin_mmds: list[float] = []
+        bin_sizes: list[int] = []
+        for b in range(n_bins):
+            mask = bin_indices == b
+            n_in_bin = int(mask.sum())
+            if n_in_bin < 2:  # noqa: PLR2004
+                continue
+            bin_mmds.append(mmd(x_flat[mask], y_flat[mask], sigma=sigma))
+            bin_sizes.append(n_in_bin)
+
+        if bin_sizes:
+            weights = np.array(bin_sizes, dtype=float)
+            weights /= weights.sum()
+            cond_mmd_val = float(np.average(bin_mmds, weights=weights))
+        else:
+            cond_mmd_val = float("nan")
+
+        result[f"cond_mmd_dim{c}"] = cond_mmd_val
+        per_cond_mmds.append(cond_mmd_val)
+
+    valid = [v for v in per_cond_mmds if not np.isnan(v)]
+    result["cond_mmd"] = float(np.mean(valid)) if valid else float("nan")
+    return result
 
 
 def optimality_gap(opt_history: list[OptiStep], baseline: float) -> list[float]:
@@ -237,6 +284,8 @@ def metrics(
     dataset_designs: npt.NDArray,
     sampled_conditions: Dataset | None = None,
     sigma: float | None = None,
+    n_cond_bins: int = 5,
+    objective_values: npt.NDArray | None = None,
 ) -> dict[str, Any]:
     """Compute various metrics for evaluating generative model designs.
 
@@ -247,6 +296,9 @@ def metrics(
         sampled_conditions (Dataset): Dataset of sampled conditions for optimization. If None, no conditions are used.
         sigma: Bandwidth parameter for the Gaussian kernel (in mmd and dpp calculation).
             If None, uses median heuristic on the reference (dataset) designs.
+        n_cond_bins: Number of quantile bins for conditional MMD. Default 5.
+        objective_values: Array of shape (n_samples,) with reference objective values for
+            performance-conditioned MMD. If None, skips cond_perf_mmd computation.
 
     Returns:
         dict[str, Any]: A dictionary containing the computed metrics:
@@ -256,6 +308,8 @@ def metrics(
             - "mmd": Maximum Mean Discrepancy (float).
             - "dpp": Determinantal Point Process diversity (float).
             - "mmd_sigma": The actual sigma used for MMD/DPP (float).
+            - "cond_mmd": Conditional pixel-MMD on design conditions (float).
+            - "cond_perf_mmd": Conditional pixel-MMD on objective values (float).
     """
     n_samples = len(gen_designs)
 
@@ -313,8 +367,8 @@ def metrics(
     # Use the same reference sigma as MMD so DPP is comparable across models
     dpp_value: float = dpp_diversity(gen_designs, sigma=sigma)
 
-    # Return all computed metrics as a dictionary
-    return {
+    # Compute conditional pixel-MMD (per condition bin, then averaged)
+    result: dict[str, Any] = {
         "iog": average_iog,
         "cog": average_cog,
         "fog": average_fog,
@@ -323,3 +377,19 @@ def metrics(
         "mmd_sigma": sigma,
         "viol": average_viol,
     }
+    if sampled_conditions is not None and len(sampled_conditions.column_names) > 0:
+        cond_array = np.column_stack([np.array(sampled_conditions[c]) for c in sampled_conditions.column_names])
+        cond_mmd_result = conditional_mmd(
+            gen_designs, flattened_ds_designs_array, cond_array, n_bins=n_cond_bins, sigma=sigma
+        )
+        result.update(cond_mmd_result)
+
+    # Conditional pixel-MMD on objective values (performance-conditioned)
+    if objective_values is not None:
+        obj_array = np.asarray(objective_values).reshape(-1, 1)
+        cond_perf_result = conditional_mmd(
+            gen_designs, flattened_ds_designs_array, obj_array, n_bins=n_cond_bins, sigma=sigma
+        )
+        result["cond_perf_mmd"] = cond_perf_result["cond_mmd"]
+
+    return result
