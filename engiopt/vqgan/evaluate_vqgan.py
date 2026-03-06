@@ -162,9 +162,13 @@ if __name__ == "__main__":
     model.to(device)
 
     ### Set up testing conditions ###
-    _, sampled_conditions, sampled_designs_np, _ = sample_conditions(
+    conditions_tensor, sampled_conditions, sampled_designs_np, selected_indices = sample_conditions(
         problem=problem, n_samples=args.n_samples, device=device, seed=seed
     )
+
+    # Extract objective values for performance-conditioned MMD
+    test_ds = problem.dataset["test"]
+    objective_values = np.array(test_ds[problem.objectives_keys[0]])[selected_indices]
 
     # Clean up conditions based on model training settings and convert back to tensor
     sampled_conditions_new = sampled_conditions.select(range(len(sampled_conditions)))
@@ -207,6 +211,7 @@ if __name__ == "__main__":
         sampled_designs_np,
         sampled_conditions,
         sigma=args.sigma,
+        objective_values=objective_values,
     )
 
     metrics_dict.update(
@@ -218,6 +223,13 @@ if __name__ == "__main__":
         }
     )
 
+    # Free all vqgan memory before LVAE encoding to avoid OOM
+    import gc
+    del model, vqgan, cvqgan
+    gc.collect()
+    if th.cuda.is_available():
+        th.cuda.empty_cache()
+
     # Compute LV metrics for all (rec, perf) threshold combinations
     if args.lvae_seed is not None and rec_thresholds and perf_thresholds:
         from sklearn.decomposition import PCA
@@ -226,6 +238,24 @@ if __name__ == "__main__":
         from engiopt.vanilla_lvae.utils import load_lvae_encoder
 
         metrics_dict["lvae_seed"] = args.lvae_seed
+
+        # Precompute condition arrays for conditional MMD
+        cond_array = np.column_stack([np.array(sampled_conditions[c]) for c in sampled_conditions.column_names])
+        obj_array = objective_values.reshape(-1, 1)
+
+        # Log base metrics to WandB immediately — before LVAE loop so they
+        # survive a job timeout during the (potentially slow) LVAE section.
+        if args.log_to_wandb and run is not None:
+            run.summary["eval/mmd"] = metrics_dict.get("mmd")
+            run.summary["eval/dpp"] = metrics_dict.get("dpp")
+            run.summary["eval/iog"] = metrics_dict.get("iog")
+            run.summary["eval/cog"] = metrics_dict.get("cog")
+            run.summary["eval/fog"] = metrics_dict.get("fog")
+            run.summary["eval/mmd_sigma"] = metrics_dict.get("mmd_sigma")
+            run.summary["eval/cond_mmd"] = metrics_dict.get("cond_mmd")
+            run.summary["eval/cond_perf_mmd"] = metrics_dict.get("cond_perf_mmd")
+            run.summary.update()
+            print("  Logged base metrics to WandB.")
 
         for rec_thresh, perf_thresh in itertools.product(rec_thresholds, perf_thresholds):
             suffix = f"_rec{rec_thresh}_perf{perf_thresh}"
@@ -246,24 +276,20 @@ if __name__ == "__main__":
                 z_data = encode_designs(encoder, sampled_designs_np, device)
                 n_active = int((np.var(z_data, axis=0) > 1e-8).sum())
 
-                # Without importance weighting (sigma from reference data for MMD, self for DPP)
                 lv_sigma = metrics.compute_median_sigma(z_data)
-                lv_mmd_val = metrics.mmd(z_gen, z_data, sigma=lv_sigma, importance_weighted=False)
-                lv_dpp_val = metrics.dpp_diversity(z_gen, sigma=lv_sigma, importance_weighted=False)
+                lv_mmd_val = metrics.mmd(z_gen, z_data, sigma=lv_sigma)
+                lv_dpp_val = metrics.dpp_diversity(z_gen, sigma=lv_sigma)
 
-                # With importance weighting
-                z_data_w = metrics.apply_importance_weights(z_data, z_data)
-                lv_sigma_iw = metrics.compute_median_sigma(z_data_w)
-                lv_mmd_iw_val = metrics.mmd(z_gen, z_data, sigma=lv_sigma_iw, importance_weighted=True)
-                lv_dpp_iw_val = metrics.dpp_diversity(z_gen, sigma=lv_sigma_iw, importance_weighted=True)
+                # Conditional LV-MMD on design conditions and on objective
+                lv_cond_mmd = metrics.conditional_mmd(z_gen, z_data, cond_array, sigma=lv_sigma)
+                lv_cond_perf_mmd = metrics.conditional_mmd(z_gen, z_data, obj_array, sigma=lv_sigma)
 
                 metrics_dict[f"lv_mmd{suffix}"] = lv_mmd_val
                 metrics_dict[f"lv_dpp{suffix}"] = lv_dpp_val
                 metrics_dict[f"lv_sigma{suffix}"] = lv_sigma
-                metrics_dict[f"lv_mmd_iw{suffix}"] = lv_mmd_iw_val
-                metrics_dict[f"lv_dpp_iw{suffix}"] = lv_dpp_iw_val
-                metrics_dict[f"lv_sigma_iw{suffix}"] = lv_sigma_iw
                 metrics_dict[f"lvae_n_active_dims{suffix}"] = n_active
+                metrics_dict[f"lv_cond_mmd{suffix}"] = lv_cond_mmd["cond_mmd"]
+                metrics_dict[f"lv_cond_perf_mmd{suffix}"] = lv_cond_perf_mmd["cond_mmd"]
 
                 # PCA baseline: project to same dimensionality as LVAE active dims
                 n_pca = min(n_active, args.n_samples - 1)  # PCA needs n_components < n_samples
@@ -276,25 +302,38 @@ if __name__ == "__main__":
                     pca_data = pca.transform(flat_data)
 
                     pca_sigma = metrics.compute_median_sigma(pca_data)
-                    pca_mmd_val = metrics.mmd(pca_gen, pca_data, sigma=pca_sigma, importance_weighted=False)
-                    pca_dpp_val = metrics.dpp_diversity(pca_gen, sigma=pca_sigma, importance_weighted=False)
+                    pca_mmd_val = metrics.mmd(pca_gen, pca_data, sigma=pca_sigma)
+                    pca_dpp_val = metrics.dpp_diversity(pca_gen, sigma=pca_sigma)
 
-                    pca_data_w = metrics.apply_importance_weights(pca_data, pca_data)
-                    pca_sigma_iw = metrics.compute_median_sigma(pca_data_w)
-                    pca_mmd_iw_val = metrics.mmd(pca_gen, pca_data, sigma=pca_sigma_iw, importance_weighted=True)
-                    pca_dpp_iw_val = metrics.dpp_diversity(pca_gen, sigma=pca_sigma_iw, importance_weighted=True)
+                    pca_cond_mmd = metrics.conditional_mmd(pca_gen, pca_data, cond_array, sigma=pca_sigma)
+                    pca_cond_perf_mmd = metrics.conditional_mmd(pca_gen, pca_data, obj_array, sigma=pca_sigma)
 
                     metrics_dict[f"pca_mmd{suffix}"] = pca_mmd_val
                     metrics_dict[f"pca_dpp{suffix}"] = pca_dpp_val
                     metrics_dict[f"pca_sigma{suffix}"] = pca_sigma
-                    metrics_dict[f"pca_mmd_iw{suffix}"] = pca_mmd_iw_val
-                    metrics_dict[f"pca_dpp_iw{suffix}"] = pca_dpp_iw_val
-                    metrics_dict[f"pca_sigma_iw{suffix}"] = pca_sigma_iw
+                    metrics_dict[f"pca_cond_mmd{suffix}"] = pca_cond_mmd["cond_mmd"]
+                    metrics_dict[f"pca_cond_perf_mmd{suffix}"] = pca_cond_perf_mmd["cond_mmd"]
                     print(f"  PCA({n_pca}): MMD={pca_mmd_val:.6f}, DPP={pca_dpp_val:.6e}")
 
-                print(f"  sigma={lv_sigma:.4f}, LV-MMD: {lv_mmd_val:.6f}, LV-DPP: {lv_dpp_val:.6e}")
-                print(f"  sigma_iw={lv_sigma_iw:.4f}, LV-MMD(iw): {lv_mmd_iw_val:.6f}, LV-DPP(iw): {lv_dpp_iw_val:.6e}")
-                print(f"  Active dims: {n_active}")
+                print(f"  LV-MMD: {lv_mmd_val:.6f}, LV-DPP: {lv_dpp_val:.6e}, Active: {n_active}")
+                print(f"  Cond LV-MMD: {lv_cond_mmd['cond_mmd']:.6f}, Cond Perf LV-MMD: {lv_cond_perf_mmd['cond_mmd']:.6f}")
+
+                # Log this combo to WandB immediately so a timeout can't erase it
+                if args.log_to_wandb and run is not None:
+                    prefix = f"eval/lv_rec{rec_thresh}_perf{perf_thresh}_lvae{args.lvae_seed}"
+                    run.summary[f"{prefix}/lv_mmd"] = metrics_dict.get(f"lv_mmd{suffix}")
+                    run.summary[f"{prefix}/lv_dpp"] = metrics_dict.get(f"lv_dpp{suffix}")
+                    run.summary[f"{prefix}/lv_sigma"] = metrics_dict.get(f"lv_sigma{suffix}")
+                    run.summary[f"{prefix}/n_active_dims"] = metrics_dict.get(f"lvae_n_active_dims{suffix}")
+                    run.summary[f"{prefix}/lv_cond_mmd"] = metrics_dict.get(f"lv_cond_mmd{suffix}")
+                    run.summary[f"{prefix}/lv_cond_perf_mmd"] = metrics_dict.get(f"lv_cond_perf_mmd{suffix}")
+                    run.summary[f"{prefix}/pca_mmd"] = metrics_dict.get(f"pca_mmd{suffix}")
+                    run.summary[f"{prefix}/pca_dpp"] = metrics_dict.get(f"pca_dpp{suffix}")
+                    run.summary[f"{prefix}/pca_sigma"] = metrics_dict.get(f"pca_sigma{suffix}")
+                    run.summary[f"{prefix}/pca_cond_mmd"] = metrics_dict.get(f"pca_cond_mmd{suffix}")
+                    run.summary[f"{prefix}/pca_cond_perf_mmd"] = metrics_dict.get(f"pca_cond_perf_mmd{suffix}")
+                    run.summary.update()
+
             except Exception as e:
                 print(f"  Failed for rec={rec_thresh}, perf={perf_thresh}: {e}")
 
@@ -303,37 +342,6 @@ if __name__ == "__main__":
     out_path = args.output_csv.format(problem_id=args.problem_id)
     write_header = not os.path.exists(out_path)
     metrics_df.to_csv(out_path, mode="a", header=write_header, index=False)
-
-    # Log to WandB training run
-    if args.log_to_wandb and run is not None:
-        # Always log base metrics
-        run.summary["eval/mmd"] = metrics_dict.get("mmd")
-        run.summary["eval/dpp"] = metrics_dict.get("dpp")
-        run.summary["eval/iog"] = metrics_dict.get("iog")
-        run.summary["eval/cog"] = metrics_dict.get("cog")
-        run.summary["eval/fog"] = metrics_dict.get("fog")
-        run.summary["eval/mmd_sigma"] = metrics_dict.get("mmd_sigma")
-
-        # Log per-combination LV metrics
-        if args.lvae_seed is not None and rec_thresholds and perf_thresholds:
-            for rec_thresh, perf_thresh in itertools.product(rec_thresholds, perf_thresholds):
-                suffix = f"_rec{rec_thresh}_perf{perf_thresh}"
-                prefix = f"eval/lv_rec{rec_thresh}_perf{perf_thresh}_lvae{args.lvae_seed}"
-                run.summary[f"{prefix}/lv_mmd"] = metrics_dict.get(f"lv_mmd{suffix}")
-                run.summary[f"{prefix}/lv_dpp"] = metrics_dict.get(f"lv_dpp{suffix}")
-                run.summary[f"{prefix}/lv_sigma"] = metrics_dict.get(f"lv_sigma{suffix}")
-                run.summary[f"{prefix}/lv_mmd_iw"] = metrics_dict.get(f"lv_mmd_iw{suffix}")
-                run.summary[f"{prefix}/lv_dpp_iw"] = metrics_dict.get(f"lv_dpp_iw{suffix}")
-                run.summary[f"{prefix}/lv_sigma_iw"] = metrics_dict.get(f"lv_sigma_iw{suffix}")
-                run.summary[f"{prefix}/n_active_dims"] = metrics_dict.get(f"lvae_n_active_dims{suffix}")
-                run.summary[f"{prefix}/pca_mmd"] = metrics_dict.get(f"pca_mmd{suffix}")
-                run.summary[f"{prefix}/pca_dpp"] = metrics_dict.get(f"pca_dpp{suffix}")
-                run.summary[f"{prefix}/pca_sigma"] = metrics_dict.get(f"pca_sigma{suffix}")
-                run.summary[f"{prefix}/pca_mmd_iw"] = metrics_dict.get(f"pca_mmd_iw{suffix}")
-                run.summary[f"{prefix}/pca_dpp_iw"] = metrics_dict.get(f"pca_dpp_iw{suffix}")
-                run.summary[f"{prefix}/pca_sigma_iw"] = metrics_dict.get(f"pca_sigma_iw{suffix}")
-
-        run.summary.update()
-        print(f"  Logged metrics to WandB run: {run.name}")
+    print(f"Seed {seed} done; appended to {out_path}")
 
     print(f"Seed {seed} done; appended to {out_path}")

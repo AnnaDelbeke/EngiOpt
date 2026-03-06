@@ -382,7 +382,8 @@ def metrics(
         cond_mmd_result = conditional_mmd(
             gen_designs, flattened_ds_designs_array, cond_array, n_bins=n_cond_bins, sigma=sigma
         )
-        result.update(cond_mmd_result)
+        result["cond_mmd"] = cond_mmd_result["cond_mmd"]
+        result["cond_mmd_sigma"] = cond_mmd_result["cond_mmd_sigma"]
 
     # Conditional pixel-MMD on objective values (performance-conditioned)
     if objective_values is not None:

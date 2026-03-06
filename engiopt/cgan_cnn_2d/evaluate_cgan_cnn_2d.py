@@ -157,6 +157,19 @@ if __name__ == "__main__":
         cond_array = np.column_stack([np.array(sampled_conditions[c]) for c in sampled_conditions.column_names])
         obj_array = objective_values.reshape(-1, 1)
 
+        # Log base metrics to WandB immediately before LVAE loop
+        if args.log_to_wandb and run is not None:
+            run.summary["eval/mmd"] = metrics_dict.get("mmd")
+            run.summary["eval/dpp"] = metrics_dict.get("dpp")
+            run.summary["eval/iog"] = metrics_dict.get("iog")
+            run.summary["eval/cog"] = metrics_dict.get("cog")
+            run.summary["eval/fog"] = metrics_dict.get("fog")
+            run.summary["eval/mmd_sigma"] = metrics_dict.get("mmd_sigma")
+            run.summary["eval/cond_mmd"] = metrics_dict.get("cond_mmd")
+            run.summary["eval/cond_perf_mmd"] = metrics_dict.get("cond_perf_mmd")
+            run.summary.update()
+            print("  Logged base metrics to WandB.")
+
         for rec_thresh, perf_thresh in itertools.product(rec_thresholds, perf_thresholds):
             suffix = f"_rec{rec_thresh}_perf{perf_thresh}"
             print(f"Loading LVAE (seed={args.lvae_seed}, rec={rec_thresh}, perf={perf_thresh})...")
@@ -217,6 +230,23 @@ if __name__ == "__main__":
 
                 print(f"  LV-MMD: {lv_mmd_val:.6f}, LV-DPP: {lv_dpp_val:.6e}, Active: {n_active}")
                 print(f"  Cond LV-MMD: {lv_cond_mmd['cond_mmd']:.6f}, Cond Perf LV-MMD: {lv_cond_perf_mmd['cond_mmd']:.6f}")
+
+                # Log this combo immediately so a timeout can't erase it
+                if args.log_to_wandb and run is not None:
+                    prefix = f"eval/lv_rec{rec_thresh}_perf{perf_thresh}_lvae{args.lvae_seed}"
+                    run.summary[f"{prefix}/lv_mmd"] = metrics_dict.get(f"lv_mmd{suffix}")
+                    run.summary[f"{prefix}/lv_dpp"] = metrics_dict.get(f"lv_dpp{suffix}")
+                    run.summary[f"{prefix}/lv_sigma"] = metrics_dict.get(f"lv_sigma{suffix}")
+                    run.summary[f"{prefix}/n_active_dims"] = metrics_dict.get(f"lvae_n_active_dims{suffix}")
+                    run.summary[f"{prefix}/lv_cond_mmd"] = metrics_dict.get(f"lv_cond_mmd{suffix}")
+                    run.summary[f"{prefix}/lv_cond_perf_mmd"] = metrics_dict.get(f"lv_cond_perf_mmd{suffix}")
+                    run.summary[f"{prefix}/pca_mmd"] = metrics_dict.get(f"pca_mmd{suffix}")
+                    run.summary[f"{prefix}/pca_dpp"] = metrics_dict.get(f"pca_dpp{suffix}")
+                    run.summary[f"{prefix}/pca_sigma"] = metrics_dict.get(f"pca_sigma{suffix}")
+                    run.summary[f"{prefix}/pca_cond_mmd"] = metrics_dict.get(f"pca_cond_mmd{suffix}")
+                    run.summary[f"{prefix}/pca_cond_perf_mmd"] = metrics_dict.get(f"pca_cond_perf_mmd{suffix}")
+                    run.summary.update()
+
             except Exception as e:
                 print(f"  Failed for rec={rec_thresh}, perf={perf_thresh}: {e}")
 
@@ -225,37 +255,4 @@ if __name__ == "__main__":
     out_path = args.output_csv.format(problem_id=args.problem_id)
     write_header = not os.path.exists(out_path)
     metrics_df.to_csv(out_path, mode="a", header=write_header, index=False)
-
-    # Log to WandB training run
-    if args.log_to_wandb and run is not None:
-        # Always log base metrics
-        run.summary["eval/mmd"] = metrics_dict.get("mmd")
-        run.summary["eval/dpp"] = metrics_dict.get("dpp")
-        run.summary["eval/iog"] = metrics_dict.get("iog")
-        run.summary["eval/cog"] = metrics_dict.get("cog")
-        run.summary["eval/fog"] = metrics_dict.get("fog")
-        run.summary["eval/mmd_sigma"] = metrics_dict.get("mmd_sigma")
-        run.summary["eval/cond_mmd"] = metrics_dict.get("cond_mmd")
-        run.summary["eval/cond_perf_mmd"] = metrics_dict.get("cond_perf_mmd")
-
-        # Log per-combination LV metrics
-        if args.lvae_seed is not None and rec_thresholds and perf_thresholds:
-            for rec_thresh, perf_thresh in itertools.product(rec_thresholds, perf_thresholds):
-                suffix = f"_rec{rec_thresh}_perf{perf_thresh}"
-                prefix = f"eval/lv_rec{rec_thresh}_perf{perf_thresh}_lvae{args.lvae_seed}"
-                run.summary[f"{prefix}/lv_mmd"] = metrics_dict.get(f"lv_mmd{suffix}")
-                run.summary[f"{prefix}/lv_dpp"] = metrics_dict.get(f"lv_dpp{suffix}")
-                run.summary[f"{prefix}/lv_sigma"] = metrics_dict.get(f"lv_sigma{suffix}")
-                run.summary[f"{prefix}/n_active_dims"] = metrics_dict.get(f"lvae_n_active_dims{suffix}")
-                run.summary[f"{prefix}/lv_cond_mmd"] = metrics_dict.get(f"lv_cond_mmd{suffix}")
-                run.summary[f"{prefix}/lv_cond_perf_mmd"] = metrics_dict.get(f"lv_cond_perf_mmd{suffix}")
-                run.summary[f"{prefix}/pca_mmd"] = metrics_dict.get(f"pca_mmd{suffix}")
-                run.summary[f"{prefix}/pca_dpp"] = metrics_dict.get(f"pca_dpp{suffix}")
-                run.summary[f"{prefix}/pca_sigma"] = metrics_dict.get(f"pca_sigma{suffix}")
-                run.summary[f"{prefix}/pca_cond_mmd"] = metrics_dict.get(f"pca_cond_mmd{suffix}")
-                run.summary[f"{prefix}/pca_cond_perf_mmd"] = metrics_dict.get(f"pca_cond_perf_mmd{suffix}")
-
-        run.summary.update()
-        print(f"  Logged metrics to WandB run: {run.name}")
-
     print(f"Seed {seed} done; appended to {out_path}")
