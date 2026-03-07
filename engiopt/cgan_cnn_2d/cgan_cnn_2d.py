@@ -416,7 +416,7 @@ if __name__ == "__main__":
                         artifact_disc = wandb.Artifact(f"{args.problem_id}_{args.algo}_discriminator", type="model")
                         artifact_disc.add_file("discriminator.pth")
 
-                        wandb.log_artifact(artifact_gen, aliases=[f"seed_{args.seed}"])
-                        wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
+                        wandb.log_artifact(artifact_gen, aliases=[f"seed_{args.seed}", f"run_{wandb.run.id}"])
+                        wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}", f"run_{wandb.run.id}"])
 
     wandb.finish()

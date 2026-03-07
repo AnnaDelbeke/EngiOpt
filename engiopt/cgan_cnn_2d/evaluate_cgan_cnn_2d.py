@@ -30,6 +30,8 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
+    run_id: str | None = None
+    """WandB run ID to evaluate (e.g. from a sweep). If provided, overrides seed-based artifact lookup."""
     n_samples: int = 50
     """Number of generated samples per seed."""
     sigma: float | None = None
@@ -88,10 +90,11 @@ if __name__ == "__main__":
     ### Set Up Generator ###
 
     # Restores the pytorch model from wandb
+    alias = f"run_{args.run_id}" if args.run_id is not None else f"seed_{seed}"
     if args.wandb_entity is not None:
-        artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_cgan_cnn_2d_generator:seed_{seed}"
+        artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_cgan_cnn_2d_generator:{alias}"
     else:
-        artifact_path = f"{args.wandb_project}/{args.problem_id}_cgan_cnn_2d_generator:seed_{seed}"
+        artifact_path = f"{args.wandb_project}/{args.problem_id}_cgan_cnn_2d_generator:{alias}"
 
     api = wandb.Api()
     artifact = api.artifact(artifact_path, type="model")
