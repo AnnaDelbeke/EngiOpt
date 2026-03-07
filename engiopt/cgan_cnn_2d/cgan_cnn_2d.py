@@ -60,7 +60,7 @@ class Args:
     """number of cpu threads to use during batch generation"""
     latent_dim: int = 32
     """dimensionality of the latent space"""
-    sample_interval: int = 400
+    sample_interval: int = 1000
     """interval between image samples"""
 
 
@@ -377,7 +377,7 @@ if __name__ == "__main__":
                         img = tensor.cpu().numpy().reshape(design_shape[0], design_shape[1])  # Extract x and y coordinates
                         dc = desired_conds[j].cpu()
                         axes[j].imshow(img)  # Scatter plot
-                        title = [(conditions[i][0], f"{dc[i]:.2f}") for i in range(n_conds)]
+                        title = [(problem.conditions_keys[i], f"{dc[i]:.2f}") for i in range(n_conds)]
                         title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
                         axes[j].title.set_text(title_string)  # Set title
                         axes[j].set_xticks([])  # Hide x ticks
