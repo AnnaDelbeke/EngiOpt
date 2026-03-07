@@ -236,7 +236,7 @@ if __name__ == "__main__":
 
     design_shape = problem.design_space.shape
     conditions = problem.conditions
-    n_conds = len(conditions)
+    n_conds = len(problem.conditions_keys)
 
     # Logging
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
