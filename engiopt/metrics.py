@@ -238,6 +238,7 @@ def simulate_failure_ratio(  # noqa: C901
 
         def worker(idx, config, return_queue):
             try:
+                problem.reset()  # Reset the problem state before simulating
                 objs = problem.simulate(unflattened_design, config=config, mpicores=10)  # noqa: B023
                 if np.isnan(objs[0]) or np.isnan(objs[1]):
                     print(f"Simulation returned NaN values for design {idx}")
@@ -324,10 +325,15 @@ def metrics(
             unflattened_design = spaces.unflatten(problem.design_space, gen_designs[i])
         else:
             unflattened_design = gen_designs[i]
+
+        problem.reset()  # Reset the problem state before optimization/simulation
         _, opt_history = problem.optimize(unflattened_design, config=conditions)
+
+        problem.reset()  # Reset again before simulating the reference optimum
         reference_optimum = problem.simulate(dataset_designs[i], config=conditions)
         opt_history_gaps = optimality_gap(opt_history, reference_optimum)
 
+        problem.reset()  # Reset again before simulating the optimized design
         iog_list.append(problem.simulate(unflattened_design, config=conditions) - reference_optimum)
         cog_list.append(np.sum(opt_history_gaps))
         fog_list.append(opt_history_gaps[-1])
