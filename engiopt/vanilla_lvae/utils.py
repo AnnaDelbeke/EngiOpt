@@ -144,6 +144,92 @@ def load_lvae_encoder(
     return encoder, lvae_config
 
 
+def load_lvae_encoder_decoder(
+    problem_id: str,
+    seed: int,
+    rec_threshold: float,
+    perf_threshold: float,
+    wandb_project: str = "engiopt",
+    wandb_entity: str | None = None,
+    device: th.device | str = "cpu",
+) -> tuple[nn.Module, nn.Module, LVAEConfig]:
+    """Load LVAE encoder and decoder from WandB (no predictor, no problem instantiation).
+
+    Args:
+        problem_id: Problem identifier (e.g., "beams2d").
+        seed: Random seed used during training.
+        rec_threshold: Reconstruction NMSE threshold used in training.
+        perf_threshold: Performance NMSE threshold used in training.
+        wandb_project: WandB project name.
+        wandb_entity: WandB entity name (None for default).
+        device: Device to load model onto.
+
+    Returns:
+        Tuple of (encoder, decoder, LVAEConfig).
+    """
+    # Build artifact path
+    artifact_name = f"{problem_id}_constrained_vanilla_plvae_2d"
+    alias = f"seed_{seed}_rec{rec_threshold}_perf{perf_threshold}"
+
+    if wandb_entity is not None:
+        artifact_path = f"{wandb_entity}/{wandb_project}/{artifact_name}:{alias}"
+    else:
+        artifact_path = f"{wandb_project}/{artifact_name}:{alias}"
+
+    api = wandb.Api()
+    artifact = api.artifact(artifact_path, type="model")
+
+    run = artifact.logged_by()
+    if run is None:
+        raise ValueError(f"Cannot retrieve run for {artifact_path}")
+
+    config = run.config
+    artifact_dir = artifact.download()
+    ckpt = th.load(os.path.join(artifact_dir, "constrained_vanilla_plvae.pth"), map_location=device, weights_only=False)
+
+    # Extract config
+    design_shape = tuple(config.get("design_shape", (100, 100)))
+    resize_dimensions = tuple(config["resize_dimensions"])
+    latent_dim = config["latent_dim"]
+    perf_dim_raw = config.get("perf_dim", latent_dim)
+    perf_dim = latent_dim if perf_dim_raw == -1 else perf_dim_raw
+
+    lvae_config = LVAEConfig(
+        latent_dim=latent_dim,
+        perf_dim=perf_dim,
+        resize_dimensions=resize_dimensions,
+        design_shape=design_shape,
+        decoder_lipschitz_scale=config.get("decoder_lipschitz_scale", 1.0),
+        predictor_lipschitz_scale=config.get("predictor_lipschitz_scale", 1.0),
+        predictor_hidden_dims=tuple(config.get("predictor_hidden_dims", (256, 128))),
+        conditional_predictor=config.get("conditional_predictor", False),
+        nmse_threshold_rec=config["nmse_threshold_rec"],
+        nmse_threshold_perf=config["nmse_threshold_perf"],
+    )
+
+    # Reconstruct encoder
+    raw_encoder = Encoder2D(latent_dim, design_shape, resize_dimensions)
+    raw_encoder.load_state_dict(ckpt["encoder"])
+
+    if "pruning_mask" in ckpt and "pruning_frozen_z" in ckpt:
+        encoder = PrunedEncoder(raw_encoder, ckpt["pruning_mask"], ckpt["pruning_frozen_z"])
+    else:
+        encoder = raw_encoder
+
+    encoder.eval().to(device)
+
+    # Reconstruct decoder
+    decoder = TrueSNDecoder2D(
+        latent_dim,
+        design_shape,
+        lipschitz_scale=config.get("decoder_lipschitz_scale", 1.0),
+    )
+    decoder.load_state_dict(ckpt["decoder"])
+    decoder.eval().to(device)
+
+    return encoder, decoder, lvae_config
+
+
 def load_full_lvae(
     problem_id: str,
     seed: int,
@@ -316,4 +402,5 @@ __all__ = [
     "encode_designs",
     "load_full_lvae",
     "load_lvae_encoder",
+    "load_lvae_encoder_decoder",
 ]

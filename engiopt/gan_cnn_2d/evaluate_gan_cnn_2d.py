@@ -47,7 +47,7 @@ class Args:
 
     # LV metric suite (optional) — requires lvae_seed + thresholds above
     compute_lv_suite: bool = False
-    """Compute full LV metric suite (projection residual, predicted perf gap, dual gap). Requires decoder."""
+    """Compute full LV metric suite (projection residual, dual gap). Requires decoder."""
 
     # WandB logging
     log_to_wandb: bool = False
@@ -156,7 +156,7 @@ if __name__ == "__main__":
         if args.compute_lv_suite:
             from engiopt.lv_metrics import lv_dual_projection_gap
             from engiopt.lv_metrics import lv_project_designs
-            from engiopt.vanilla_lvae.utils import load_full_lvae
+            from engiopt.vanilla_lvae.utils import load_lvae_encoder_decoder
 
         metrics_dict["lvae_seed"] = args.lvae_seed
 
@@ -166,7 +166,7 @@ if __name__ == "__main__":
             try:
                 decoder = None
                 if args.compute_lv_suite:
-                    encoder, decoder, _, lvae_config = load_full_lvae(
+                    encoder, decoder, lvae_config = load_lvae_encoder_decoder(
                         problem_id=args.problem_id,
                         seed=args.lvae_seed,
                         rec_threshold=rec_thresh,
@@ -210,7 +210,7 @@ if __name__ == "__main__":
                     recon_only_thresh = 1000.0
                     if perf_thresh != recon_only_thresh:
                         try:
-                            enc_ro, dec_ro, _, _ = load_full_lvae(
+                            enc_ro, dec_ro, _ = load_lvae_encoder_decoder(
                                 problem_id=args.problem_id,
                                 seed=args.lvae_seed,
                                 rec_threshold=rec_thresh,
