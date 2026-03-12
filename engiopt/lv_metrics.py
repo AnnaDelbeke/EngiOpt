@@ -25,6 +25,11 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
+def _get_device(model: nn.Module) -> object:
+    """Infer the device a model lives on from its first parameter."""
+    return next(model.parameters()).device
+
+
 def _encode_decode(
     encoder: nn.Module,
     decoder: nn.Module,
@@ -34,18 +39,23 @@ def _encode_decode(
 ) -> tuple[npt.NDArray, npt.NDArray]:
     """Encode then decode, returning latent codes and reconstructions.
 
+    The encoder runs on ``device`` (typically GPU for speed).  The decoder
+    runs on whatever device it already lives on — kept on CPU by default to
+    avoid CUDA SIGFPE from spectral-norm deconvolutions.
+
     Args:
         encoder: Trained LVAE encoder.
         decoder: Trained LVAE decoder.
         designs: Designs of shape (N, H, W) or (N, 1, H, W).
-        device: Torch device.
+        device: Torch device for the encoder.
         batch_size: Batch size for processing.
 
     Returns:
         Tuple of (latent_codes (N, D), reconstructed_designs (N, H, W)).
     """
     z = encode_designs(encoder, designs, device, batch_size=batch_size)
-    recon = decode_designs(decoder, z, device, batch_size=batch_size)
+    decode_device = _get_device(decoder)
+    recon = decode_designs(decoder, z, decode_device, batch_size=batch_size)
     return z, recon
 
 

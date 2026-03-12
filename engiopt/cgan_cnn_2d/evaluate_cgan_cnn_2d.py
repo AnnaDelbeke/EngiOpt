@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import os
+import sys
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import numpy as np
@@ -185,27 +186,16 @@ if __name__ == "__main__":
             suffix = f"_rec{rec_thresh}_perf{perf_thresh}"
             print(f"Loading LVAE (seed={args.lvae_seed}, rec={rec_thresh}, perf={perf_thresh})...")
             try:
-                decoder = None
-                if args.compute_lv_suite:
-                    encoder, decoder, lvae_config = load_lvae_encoder_decoder(
-                        problem_id=args.problem_id,
-                        seed=args.lvae_seed,
-                        rec_threshold=rec_thresh,
-                        perf_threshold=perf_thresh,
-                        wandb_project=args.wandb_project,
-                        wandb_entity=args.wandb_entity,
-                        device=device,
-                    )
-                else:
-                    encoder, lvae_config = load_lvae_encoder(
-                        problem_id=args.problem_id,
-                        seed=args.lvae_seed,
-                        rec_threshold=rec_thresh,
-                        perf_threshold=perf_thresh,
-                        wandb_project=args.wandb_project,
-                        wandb_entity=args.wandb_entity,
-                        device=device,
-                    )
+                # Always load encoder (reliable path that worked before the suite overhaul)
+                encoder, lvae_config = load_lvae_encoder(
+                    problem_id=args.problem_id,
+                    seed=args.lvae_seed,
+                    rec_threshold=rec_thresh,
+                    perf_threshold=perf_thresh,
+                    wandb_project=args.wandb_project,
+                    wandb_entity=args.wandb_entity,
+                    device=device,
+                )
 
                 # Encode designs to latent space
                 z_gen = encode_designs(encoder, gen_designs_np, device)
@@ -221,16 +211,29 @@ if __name__ == "__main__":
                 metrics_dict[f"lv_sigma{suffix}"] = lv_sigma
                 metrics_dict[f"lvae_n_active_dims{suffix}"] = n_active
 
-                # LV metric suite: projection residual
-                if args.compute_lv_suite and decoder is not None:
-                    proj_residuals, _ = lv_project_designs(encoder, decoder, gen_designs_np, device)
-                    metrics_dict[f"lv_proj_residual_mean{suffix}"] = float(proj_residuals.mean())
-                    print(f"  LV-ProjRes: {proj_residuals.mean():.6f}")
+                # LV metric suite: projection residual + dual gap (isolated so failures don't block basic LV metrics)
+                if args.compute_lv_suite:
+                    try:
+                        print("  [diag] Loading decoder...", flush=True)
+                        _, decoder, _ = load_lvae_encoder_decoder(
+                            problem_id=args.problem_id,
+                            seed=args.lvae_seed,
+                            rec_threshold=rec_thresh,
+                            perf_threshold=perf_thresh,
+                            wandb_project=args.wandb_project,
+                            wandb_entity=args.wandb_entity,
+                            device=device,
+                        )
+                        print(f"  [diag] Decoder loaded on {next(decoder.parameters()).device}", flush=True)
+                        print("  [diag] Running lv_project_designs (encode→decode)...", flush=True)
+                        proj_residuals, _ = lv_project_designs(encoder, decoder, gen_designs_np, device)
+                        print("  [diag] lv_project_designs done", flush=True)
+                        metrics_dict[f"lv_proj_residual_mean{suffix}"] = float(proj_residuals.mean())
+                        print(f"  LV-ProjRes: {proj_residuals.mean():.6f}")
 
-                    # Dual-LVAE projection gap: compare perf vs recon-only projections
-                    recon_only_thresh = 1000.0
-                    if perf_thresh != recon_only_thresh:
-                        try:
+                        # Dual-LVAE projection gap: compare perf vs recon-only projections
+                        recon_only_thresh = 1000.0
+                        if perf_thresh != recon_only_thresh:
                             enc_ro, dec_ro, _ = load_lvae_encoder_decoder(
                                 problem_id=args.problem_id,
                                 seed=args.lvae_seed,
@@ -245,8 +248,8 @@ if __name__ == "__main__":
                             metrics_dict[f"lv_residual_perf_mean{suffix}"] = dual["residual_perf_mean"]
                             metrics_dict[f"lv_residual_recon_mean{suffix}"] = dual["residual_recon_mean"]
                             print(f"  LV-DualGap: {dual['dual_gap_mean']:.6f}")
-                        except Exception as e:
-                            print(f"  Dual gap failed (recon-only LVAE not found): {e}")
+                    except Exception as e:
+                        print(f"  LV suite failed: {e}")
 
                 # PCA baseline: project to same dimensionality as LVAE active dims
                 n_pca = min(n_active, args.n_samples - 1)

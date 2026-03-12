@@ -185,7 +185,9 @@ def load_lvae_encoder_decoder(
 
     config = run.config
     artifact_dir = artifact.download()
-    ckpt = th.load(os.path.join(artifact_dir, "constrained_vanilla_plvae.pth"), map_location=device, weights_only=False)
+    # Load checkpoint to CPU first; encoder is moved to ``device`` explicitly,
+    # decoder stays on CPU to avoid CUDA SIGFPE from spectral-norm deconvolutions.
+    ckpt = th.load(os.path.join(artifact_dir, "constrained_vanilla_plvae.pth"), map_location="cpu", weights_only=False)
 
     # Extract config
     design_shape = tuple(config.get("design_shape", (100, 100)))
@@ -207,7 +209,7 @@ def load_lvae_encoder_decoder(
         nmse_threshold_perf=config["nmse_threshold_perf"],
     )
 
-    # Reconstruct encoder
+    # Reconstruct encoder — moved to target device for fast latent encoding
     raw_encoder = Encoder2D(latent_dim, design_shape, resize_dimensions)
     raw_encoder.load_state_dict(ckpt["encoder"])
 
@@ -218,14 +220,16 @@ def load_lvae_encoder_decoder(
 
     encoder.eval().to(device)
 
-    # Reconstruct decoder
+    # Reconstruct decoder — kept on CPU to avoid CUDA SIGFPE from spectral-norm
+    # deconvolutions.  The decode path (50 samples through a small network) is
+    # fast on CPU and the latent codes from encode_designs are already numpy/CPU.
     decoder = TrueSNDecoder2D(
         latent_dim,
         design_shape,
         lipschitz_scale=config.get("decoder_lipschitz_scale", 1.0),
     )
     decoder.load_state_dict(ckpt["decoder"])
-    decoder.eval().to(device)
+    decoder.eval()
 
     return encoder, decoder, lvae_config
 
