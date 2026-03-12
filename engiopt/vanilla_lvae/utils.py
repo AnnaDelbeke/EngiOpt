@@ -276,9 +276,43 @@ def encode_designs(
     return np.concatenate(codes, axis=0)
 
 
+def decode_designs(
+    decoder: nn.Module,
+    latent_codes: npt.NDArray,
+    device: th.device | str,
+    batch_size: int = 256,
+) -> npt.NDArray:
+    """Decode latent codes to designs using an LVAE decoder.
+
+    Args:
+        decoder: Trained LVAE decoder.
+        latent_codes: Latent codes of shape (N, latent_dim).
+        device: Device for decoding.
+        batch_size: Batch size for decoding.
+
+    Returns:
+        Reconstructed designs of shape (N, H, W).
+    """
+    decoder.eval()
+    device = th.device(device) if isinstance(device, str) else device
+
+    z_t = th.from_numpy(latent_codes).float()
+
+    designs = []
+    with th.no_grad():
+        for i in range(0, len(z_t), batch_size):
+            batch = z_t[i : i + batch_size].to(device)
+            x = decoder(batch)
+            # Squeeze channel dim: (B, 1, H, W) -> (B, H, W)
+            designs.append(x.squeeze(1).cpu().numpy())
+
+    return np.concatenate(designs, axis=0)
+
+
 __all__ = [
     "LVAEConfig",
     "PrunedEncoder",
+    "decode_designs",
     "encode_designs",
     "load_full_lvae",
     "load_lvae_encoder",

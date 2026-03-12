@@ -285,8 +285,6 @@ def metrics(
     dataset_designs: npt.NDArray,
     sampled_conditions: Dataset | None = None,
     sigma: float | None = None,
-    n_cond_bins: int = 5,
-    objective_values: npt.NDArray | None = None,
 ) -> dict[str, Any]:
     """Compute various metrics for evaluating generative model designs.
 
@@ -297,20 +295,25 @@ def metrics(
         sampled_conditions (Dataset): Dataset of sampled conditions for optimization. If None, no conditions are used.
         sigma: Bandwidth parameter for the Gaussian kernel (in mmd and dpp calculation).
             If None, uses median heuristic on the reference (dataset) designs.
-        n_cond_bins: Number of quantile bins for conditional MMD. Default 5.
-        objective_values: Array of shape (n_samples,) with reference objective values for
-            performance-conditioned MMD. If None, skips cond_perf_mmd computation.
 
     Returns:
         dict[str, Any]: A dictionary containing the computed metrics:
             - "iog": Average Initial Optimality Gap (float).
             - "cog": Average Cumulative Optimality Gap (float).
             - "fog": Average Final Optimality Gap (float).
+            - "iog_median": Median Initial Optimality Gap (float).
+            - "cog_median": Median Cumulative Optimality Gap (float).
+            - "fog_median": Median Final Optimality Gap (float).
+            - "iog_iqr": IQR of Initial Optimality Gap (float).
+            - "cog_iqr": IQR of Cumulative Optimality Gap (float).
+            - "fog_iqr": IQR of Final Optimality Gap (float).
+            - "iog_list": Per-sample Initial Optimality Gaps (list[float]).
+            - "cog_list": Per-sample Cumulative Optimality Gaps (list[float]).
+            - "fog_list": Per-sample Final Optimality Gaps (list[float]).
+            - "viol_list": Per-sample constraint violations (list[bool]).
             - "mmd": Maximum Mean Discrepancy (float).
             - "dpp": Determinantal Point Process diversity (float).
             - "mmd_sigma": The actual sigma used for MMD/DPP (float).
-            - "cond_mmd": Conditional pixel-MMD on design conditions (float).
-            - "cond_perf_mmd": Conditional pixel-MMD on objective values (float).
     """
     n_samples = len(gen_designs)
 
@@ -346,11 +349,23 @@ def metrics(
                 viol = np.abs(np.mean(unflattened_design) - target_vol) >= tol
                 viol_list.append(viol)
 
-    # Compute the average Initial Optimality Gap (IOG), Cumulative Optimality Gap (COG), and Final Optimality Gap (FOG)
-    average_iog: float = float(np.mean(iog_list))  # Average of initial optimality gaps
-    average_cog: float = float(np.mean(cog_list))  # Average of cumulative optimality gaps
-    average_fog: float = float(np.mean(fog_list))  # Average of final optimality gaps
-    average_viol: float = float(np.mean(viol_list))  # Average of violation ratios
+    # Compute aggregated statistics for IOG, COG, FOG
+    iog_arr = np.array(iog_list)
+    cog_arr = np.array(cog_list)
+    fog_arr = np.array(fog_list)
+
+    average_iog: float = float(np.mean(iog_arr))
+    average_cog: float = float(np.mean(cog_arr))
+    average_fog: float = float(np.mean(fog_arr))
+    average_viol: float = float(np.mean(viol_list))
+
+    median_iog: float = float(np.median(iog_arr))
+    median_cog: float = float(np.median(cog_arr))
+    median_fog: float = float(np.median(fog_arr))
+
+    iqr_iog: float = float(np.subtract(*np.percentile(iog_arr, [75, 25])))
+    iqr_cog: float = float(np.subtract(*np.percentile(cog_arr, [75, 25])))
+    iqr_fog: float = float(np.subtract(*np.percentile(fog_arr, [75, 25])))
 
     # Compute the Maximum Mean Discrepancy (MMD) between generated and dataset designs
     # We compute the MMD on the flattened designs
@@ -373,30 +388,24 @@ def metrics(
     # Use the same reference sigma as MMD so DPP is comparable across models
     dpp_value: float = dpp_diversity(gen_designs, sigma=sigma)
 
-    # Compute conditional pixel-MMD (per condition bin, then averaged)
     result: dict[str, Any] = {
         "iog": average_iog,
         "cog": average_cog,
         "fog": average_fog,
+        "iog_median": median_iog,
+        "cog_median": median_cog,
+        "fog_median": median_fog,
+        "iog_iqr": iqr_iog,
+        "cog_iqr": iqr_cog,
+        "fog_iqr": iqr_fog,
+        "iog_list": iog_list,
+        "cog_list": cog_list,
+        "fog_list": fog_list,
+        "viol_list": viol_list,
         "mmd": mmd_value,
         "dpp": dpp_value,
         "mmd_sigma": sigma,
         "viol": average_viol,
     }
-    if sampled_conditions is not None and len(sampled_conditions.column_names) > 0:
-        cond_array = np.column_stack([np.array(sampled_conditions[c]) for c in sampled_conditions.column_names])
-        cond_mmd_result = conditional_mmd(
-            gen_designs, flattened_ds_designs_array, cond_array, n_bins=n_cond_bins, sigma=sigma
-        )
-        result["cond_mmd"] = cond_mmd_result["cond_mmd"]
-        result["cond_mmd_sigma"] = cond_mmd_result["cond_mmd_sigma"]
-
-    # Conditional pixel-MMD on objective values (performance-conditioned)
-    if objective_values is not None:
-        obj_array = np.asarray(objective_values).reshape(-1, 1)
-        cond_perf_result = conditional_mmd(
-            gen_designs, flattened_ds_designs_array, obj_array, n_bins=n_cond_bins, sigma=sigma
-        )
-        result["cond_perf_mmd"] = cond_perf_result["cond_mmd"]
 
     return result
