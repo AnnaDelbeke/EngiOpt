@@ -5,7 +5,6 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import os
-import sys
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import numpy as np
@@ -202,6 +201,7 @@ if __name__ == "__main__":
                             wandb_project=args.wandb_project,
                             wandb_entity=args.wandb_entity,
                             device=device,
+                            design_shape=problem.design_space.shape,
                         )
                         print(f"  [diag] Decoder loaded on {next(decoder.parameters()).device}", flush=True)
                         print("  [diag] Running lv_project_designs (encode→decode)...", flush=True)
@@ -221,6 +221,7 @@ if __name__ == "__main__":
                                 wandb_project=args.wandb_project,
                                 wandb_entity=args.wandb_entity,
                                 device=device,
+                                design_shape=problem.design_space.shape,
                             )
                             dual = lv_dual_projection_gap(encoder, decoder, enc_ro, dec_ro, gen_designs_np, device)
                             metrics_dict[f"lv_dual_gap_mean{suffix}"] = dual["dual_gap_mean"]

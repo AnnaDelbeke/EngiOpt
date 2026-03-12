@@ -152,6 +152,7 @@ def load_lvae_encoder_decoder(
     wandb_project: str = "engiopt",
     wandb_entity: str | None = None,
     device: th.device | str = "cpu",
+    design_shape: tuple[int, ...] | None = None,
 ) -> tuple[nn.Module, nn.Module, LVAEConfig]:
     """Load LVAE encoder and decoder from WandB (no predictor, no problem instantiation).
 
@@ -163,6 +164,9 @@ def load_lvae_encoder_decoder(
         wandb_project: WandB project name.
         wandb_entity: WandB entity name (None for default).
         device: Device to load model onto.
+        design_shape: Override for the design spatial dimensions (H, W).
+            If provided, used instead of the value in the training config.
+            Pass ``problem.design_space.shape`` to guarantee correctness.
 
     Returns:
         Tuple of (encoder, decoder, LVAEConfig).
@@ -189,8 +193,8 @@ def load_lvae_encoder_decoder(
     # decoder stays on CPU to avoid CUDA SIGFPE from spectral-norm deconvolutions.
     ckpt = th.load(os.path.join(artifact_dir, "constrained_vanilla_plvae.pth"), map_location="cpu", weights_only=False)
 
-    # Extract config
-    design_shape = tuple(config.get("design_shape", (100, 100)))
+    # Extract config — prefer caller-supplied design_shape over config value
+    design_shape_ = design_shape if design_shape is not None else tuple(config.get("design_shape", (100, 100)))
     resize_dimensions = tuple(config["resize_dimensions"])
     latent_dim = config["latent_dim"]
     perf_dim_raw = config.get("perf_dim", latent_dim)
@@ -200,7 +204,7 @@ def load_lvae_encoder_decoder(
         latent_dim=latent_dim,
         perf_dim=perf_dim,
         resize_dimensions=resize_dimensions,
-        design_shape=design_shape,
+        design_shape=design_shape_,
         decoder_lipschitz_scale=config.get("decoder_lipschitz_scale", 1.0),
         predictor_lipschitz_scale=config.get("predictor_lipschitz_scale", 1.0),
         predictor_hidden_dims=tuple(config.get("predictor_hidden_dims", (256, 128))),
@@ -210,7 +214,7 @@ def load_lvae_encoder_decoder(
     )
 
     # Reconstruct encoder — moved to target device for fast latent encoding
-    raw_encoder = Encoder2D(latent_dim, design_shape, resize_dimensions)
+    raw_encoder = Encoder2D(latent_dim, design_shape_, resize_dimensions)
     raw_encoder.load_state_dict(ckpt["encoder"])
 
     if "pruning_mask" in ckpt and "pruning_frozen_z" in ckpt:
@@ -225,7 +229,7 @@ def load_lvae_encoder_decoder(
     # fast on CPU and the latent codes from encode_designs are already numpy/CPU.
     decoder = TrueSNDecoder2D(
         latent_dim,
-        design_shape,
+        design_shape_,
         lipschitz_scale=config.get("decoder_lipschitz_scale", 1.0),
     )
     decoder.load_state_dict(ckpt["decoder"])
