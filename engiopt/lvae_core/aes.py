@@ -27,7 +27,9 @@ import torch.nn.functional as f
 from tqdm import tqdm
 
 if TYPE_CHECKING:
-    from engiopt.lvae_core.constraint_handlers import ConstraintHandler, ConstraintLosses, ConstraintThresholds
+    from engiopt.lvae_core.constraint_handlers import ConstraintHandler
+    from engiopt.lvae_core.constraint_handlers import ConstraintLosses
+    from engiopt.lvae_core.constraint_handlers import ConstraintThresholds
 
 
 class _AutoEncoder(nn.Module):
@@ -1025,7 +1027,8 @@ class ConstrainedDesignLeastVolumeAE_DP(InterpretableDesignLeastVolumeAE_DP):  #
 
     def update_constraint_handler(self):
         """Update constraint handler state (e.g., dual variables, barrier parameter)."""
-        from engiopt.lvae_core.constraint_handlers import ConstraintLosses, ConstraintThresholds
+        from engiopt.lvae_core.constraint_handlers import ConstraintLosses
+        from engiopt.lvae_core.constraint_handlers import ConstraintThresholds
 
         if self._loss_components is None:
             raise RuntimeError("Must call loss() before update_constraint_handler()")
