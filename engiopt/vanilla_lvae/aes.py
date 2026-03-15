@@ -260,7 +260,7 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         s = self._frozen_std.clone()
         if (~self._p).any():
             s[~self._p] = z[:, ~self._p].std(0)
-        vol_loss = torch.exp(torch.log(s + 1e-12).mean())
+        vol_loss = torch.exp(torch.log(s).mean())
 
         return torch.stack([self.loss_rec(x, x_hat), vol_loss])
 
@@ -992,10 +992,8 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
             return rec_loss
         if nmse_perf > self.nmse_threshold_perf:
             # Reconstruction OK, performance violated - fix performance
-            # Keep rec_loss as stabilizer to prevent encoder drift that
-            # would push reconstruction back above threshold (oscillation).
             self._vol_active = False
-            return perf_loss + rec_loss
+            return perf_loss
         # BOTH constraints satisfied - optimize volume
         self._vol_active = True
         return vol_loss
