@@ -264,26 +264,50 @@ if __name__ == "__main__":
         xd = x_train[:2].to(device)
         print(f"DEBUG: encoder input shape={xd.shape}", flush=True)
         z = plvae.encoder(xd)
-        print(f"DEBUG: encoder OK, z shape={z.shape}, NaN={th.isnan(z).any()}", flush=True)
-        # Step through decoder internals
+        if th.cuda.is_available():
+            th.cuda.synchronize()
+        print(f"DEBUG: encoder OK, z shape={z.shape}, NaN={th.isnan(z).any().item()}", flush=True)
+
+        # Test decoder proj on CPU first to isolate CUDA vs logic issue
+        print("DEBUG: testing decoder proj on CPU...", flush=True)
+        z_cpu = z.cpu()
+        proj_cpu = plvae.decoder.proj.cpu()
+        h_cpu = proj_cpu(z_cpu)
+        print(f"DEBUG: decoder proj CPU OK, shape={h_cpu.shape}, NaN={th.isnan(h_cpu).any().item()}", flush=True)
+        # Move proj back to GPU
+        proj_gpu = proj_cpu.to(device)
+
+        # Now test on GPU with explicit sync
+        print("DEBUG: testing decoder proj on GPU...", flush=True)
         h = plvae.decoder.proj(z)
-        print(f"DEBUG: decoder proj OK, shape={h.shape}, NaN={th.isnan(h).any()}", flush=True)
+        if th.cuda.is_available():
+            th.cuda.synchronize()
+        print(f"DEBUG: decoder proj GPU OK, shape={h.shape}, NaN={th.isnan(h).any().item()}", flush=True)
+
         h = h.view(z.size(0), 512, 7, 7)
         print(f"DEBUG: decoder reshape OK, shape={h.shape}", flush=True)
         for k, layer in enumerate(plvae.decoder.deconv):
             h = layer(h)
-            print(f"DEBUG: decoder deconv[{k}] OK, shape={h.shape}, NaN={th.isnan(h).any()}", flush=True)
+            if th.cuda.is_available():
+                th.cuda.synchronize()
+            print(f"DEBUG: decoder deconv[{k}] OK, shape={h.shape}, NaN={th.isnan(h).any().item()}", flush=True)
         h = plvae.decoder.resize_out(h)
+        if th.cuda.is_available():
+            th.cuda.synchronize()
         print(f"DEBUG: decoder resize OK, shape={h.shape}", flush=True)
         xh = th.sigmoid(h * plvae.decoder.lipschitz_scale)
-        print(f"DEBUG: decoder sigmoid OK, shape={xh.shape}, NaN={th.isnan(xh).any()}", flush=True)
+        print(f"DEBUG: decoder sigmoid OK, shape={xh.shape}, NaN={th.isnan(xh).any().item()}", flush=True)
         cd = c_train_scaled[:2].to(device)
         pd_in = th.cat([z[:, :perf_dim], cd], dim=-1)
         print(f"DEBUG: predictor input shape={pd_in.shape}", flush=True)
         ph = plvae.predictor(pd_in)
-        print(f"DEBUG: predictor OK, ph shape={ph.shape}, NaN={th.isnan(ph).any()}", flush=True)
+        if th.cuda.is_available():
+            th.cuda.synchronize()
+        print(f"DEBUG: predictor OK, ph shape={ph.shape}, NaN={th.isnan(ph).any().item()}", flush=True)
         pd = p_train_scaled[:2].to(device)
         test_loss = plvae.loss((xd, cd, pd))
+        if th.cuda.is_available():
+            th.cuda.synchronize()
         print(f"DEBUG: full loss OK, loss={test_loss.item():.6f}", flush=True)
     print("DEBUG: forward pass test PASSED, starting training", flush=True)
 
