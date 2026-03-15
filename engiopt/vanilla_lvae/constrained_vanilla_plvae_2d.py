@@ -200,34 +200,20 @@ if __name__ == "__main__":
     hf = problem.dataset.with_format("torch")
     train_ds = hf["train"]
     val_ds = hf["val"]
-    print(f"DEBUG: dataset loaded, train size={len(train_ds)}, val size={len(val_ds)}", flush=True)
 
     # Extract designs, conditions, and performance
     x_train = train_ds["optimal_design"][:].unsqueeze(1)
-    print(f"DEBUG: x_train shape={x_train.shape}, dtype={x_train.dtype}", flush=True)
     c_train = th.stack([train_ds[key][:] for key in problem.conditions_keys], dim=-1)
-    print(f"DEBUG: c_train shape={c_train.shape}", flush=True)
     p_train = train_ds[problem.objectives_keys[0]][:].unsqueeze(-1)  # (N, 1)
-    print(
-        f"DEBUG: p_train shape={p_train.shape}, min={p_train.min():.6f}, max={p_train.max():.6f}, "
-        f"NaN={th.isnan(p_train).any()}, Inf={th.isinf(p_train).any()}",
-        flush=True,
-    )
 
     x_val = val_ds["optimal_design"][:].unsqueeze(1)
     c_val = th.stack([val_ds[key][:] for key in problem.conditions_keys], dim=-1)
     p_val = val_ds[problem.objectives_keys[0]][:].unsqueeze(-1)
 
     # Scale performance values using RobustScaler
-    print("DEBUG: fitting RobustScaler...", flush=True)
     p_scaler = RobustScaler()
     p_train_scaled = th.from_numpy(p_scaler.fit_transform(p_train.numpy())).to(p_train.dtype)
     p_val_scaled = th.from_numpy(p_scaler.transform(p_val.numpy())).to(p_val.dtype)
-    print(
-        f"DEBUG: RobustScaler done, scale={p_scaler.scale_}, center={p_scaler.center_}, "
-        f"p_train_scaled NaN={th.isnan(p_train_scaled).any()}, Inf={th.isinf(p_train_scaled).any()}",
-        flush=True,
-    )
 
     # Scale conditions using RobustScaler (if using conditional predictor)
     if args.conditional_predictor:
@@ -257,59 +243,6 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         shuffle=False,
     )
-
-    # ---- DEBUG: test forward pass before training ----
-    print("DEBUG: testing forward pass...", flush=True)
-    with th.no_grad():
-        xd = x_train[:2].to(device)
-        print(f"DEBUG: encoder input shape={xd.shape}", flush=True)
-        z = plvae.encoder(xd)
-        if th.cuda.is_available():
-            th.cuda.synchronize()
-        print(f"DEBUG: encoder OK, z shape={z.shape}, NaN={th.isnan(z).any().item()}", flush=True)
-
-        # Test decoder proj on CPU first to isolate CUDA vs logic issue
-        print("DEBUG: testing decoder proj on CPU...", flush=True)
-        z_cpu = z.cpu()
-        proj_cpu = plvae.decoder.proj.cpu()
-        h_cpu = proj_cpu(z_cpu)
-        print(f"DEBUG: decoder proj CPU OK, shape={h_cpu.shape}, NaN={th.isnan(h_cpu).any().item()}", flush=True)
-        # Move proj back to GPU
-        proj_gpu = proj_cpu.to(device)
-
-        # Now test on GPU with explicit sync
-        print("DEBUG: testing decoder proj on GPU...", flush=True)
-        h = plvae.decoder.proj(z)
-        if th.cuda.is_available():
-            th.cuda.synchronize()
-        print(f"DEBUG: decoder proj GPU OK, shape={h.shape}, NaN={th.isnan(h).any().item()}", flush=True)
-
-        h = h.view(z.size(0), 512, 7, 7)
-        print(f"DEBUG: decoder reshape OK, shape={h.shape}", flush=True)
-        for k, layer in enumerate(plvae.decoder.deconv):
-            h = layer(h)
-            if th.cuda.is_available():
-                th.cuda.synchronize()
-            print(f"DEBUG: decoder deconv[{k}] OK, shape={h.shape}, NaN={th.isnan(h).any().item()}", flush=True)
-        h = plvae.decoder.resize_out(h)
-        if th.cuda.is_available():
-            th.cuda.synchronize()
-        print(f"DEBUG: decoder resize OK, shape={h.shape}", flush=True)
-        xh = th.sigmoid(h * plvae.decoder.lipschitz_scale)
-        print(f"DEBUG: decoder sigmoid OK, shape={xh.shape}, NaN={th.isnan(xh).any().item()}", flush=True)
-        cd = c_train_scaled[:2].to(device)
-        pd_in = th.cat([z[:, :perf_dim], cd], dim=-1)
-        print(f"DEBUG: predictor input shape={pd_in.shape}", flush=True)
-        ph = plvae.predictor(pd_in)
-        if th.cuda.is_available():
-            th.cuda.synchronize()
-        print(f"DEBUG: predictor OK, ph shape={ph.shape}, NaN={th.isnan(ph).any().item()}", flush=True)
-        pd = p_train_scaled[:2].to(device)
-        test_loss = plvae.loss((xd, cd, pd))
-        if th.cuda.is_available():
-            th.cuda.synchronize()
-        print(f"DEBUG: full loss OK, loss={test_loss.item():.6f}", flush=True)
-    print("DEBUG: forward pass test PASSED, starting training", flush=True)
 
     # ---- Training loop ----
     for epoch in range(args.n_epochs):
