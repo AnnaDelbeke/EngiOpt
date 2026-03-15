@@ -788,18 +788,18 @@ class InterpretablePerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: 
 
 
 class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
-    """Constrained performance-predicting LVAE with one-sided constraint handling.
+    """Constrained performance-predicting LVAE with joint constraint handling.
 
-    Extends the one-sided constraint method to handle two constraints:
+    Handles two constraints jointly:
     1. Reconstruction constraint: NMSE_rec <= threshold_rec
     2. Performance constraint: NMSE_perf <= threshold_perf
 
-    Uses **reconstruction-first priority**: reconstruction must be satisfied before
-    performance, and both must be satisfied before volume optimization begins.
+    Optimizes reconstruction and performance **jointly** until both constraints
+    are satisfied, then switches to volume optimization. This avoids oscillation
+    between tiers when satisfying one constraint destabilizes the other.
 
-    One-sided logic:
-        - If rec NMSE > threshold_rec: optimize reconstruction only
-        - Elif perf NMSE > threshold_perf: optimize performance only
+    Joint constraint logic:
+        - If rec NMSE > threshold OR perf NMSE > threshold: optimize rec + perf
         - Else: optimize volume only (both constraints satisfied)
 
     Uses **Normalized MSE (NMSE)** for problem-independent thresholding:
@@ -945,7 +945,7 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         self._perf_var_set = True
 
     def loss(self, batch: tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> torch.Tensor:
-        """Compute loss with reconstruction-first priority one-sided switching.
+        """Compute loss with joint rec+perf constraint switching.
 
         Args:
             batch: Tuple of (designs, conditions, performance_targets).
@@ -985,17 +985,12 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         self._current_perf_loss = perf_loss.item()
         self._current_vol_loss = vol_loss.item()
 
-        # One-sided constraint logic (reconstruction-first priority)
-        if nmse_rec > self.nmse_threshold_rec:
-            # Reconstruction violated - fix geometry first
+        # Joint constraint logic: optimize rec+perf together until both
+        # are satisfied, then switch to volume optimization.
+        if nmse_rec > self.nmse_threshold_rec or nmse_perf > self.nmse_threshold_perf:
+            # At least one constraint violated - optimize both jointly
             self._vol_active = False
-            return rec_loss
-        if nmse_perf > self.nmse_threshold_perf:
-            # Reconstruction OK, performance violated - fix performance
-            # Keep rec_loss as stabilizer to prevent encoder drift that
-            # would push reconstruction back above threshold (oscillation).
-            self._vol_active = False
-            return perf_loss + rec_loss
+            return rec_loss + perf_loss
         # BOTH constraints satisfied - optimize volume
         self._vol_active = True
         return vol_loss
