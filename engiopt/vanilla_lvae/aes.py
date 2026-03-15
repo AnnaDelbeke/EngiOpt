@@ -993,7 +993,7 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
             return rec_loss + perf_loss
         # BOTH constraints satisfied - optimize volume
         self._vol_active = True
-        return vol_loss
+        return vol_loss + rec_loss + perf_loss
 
     @torch.no_grad()
     def _prune_step(self, epoch: int) -> None:
