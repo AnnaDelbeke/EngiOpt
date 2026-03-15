@@ -787,6 +787,10 @@ class InterpretablePerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: 
         )
 
 
+# Thresholds at or above this value are treated as "disabled" (recon-only ablation).
+_PERF_DISABLED_THRESHOLD = 100.0
+
+
 class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
     """Constrained performance-predicting LVAE with joint constraint handling.
 
@@ -867,6 +871,10 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         self.register_buffer("_perf_var", torch.tensor(1.0))
         self._data_var_set = False
         self._perf_var_set = False
+
+        # Performance is disabled when the threshold is unreasonably large
+        # (e.g. the legacy perf=1000 recon-only ablation convention).
+        self._perf_enabled: bool = nmse_threshold_perf < _PERF_DISABLED_THRESHOLD
 
         # Current state for logging
         self._current_nmse_rec: float = 0.0
@@ -960,13 +968,16 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         # Update moving statistics for pruning
         self._update_moving_mean(z)
 
-        # Performance prediction (first perf_dim dims + conditions)
-        pz = z[:, : self.perf_dim]
-        p_hat = self.predictor(torch.cat([pz, c], dim=-1))
-
-        # Compute individual losses
+        # Compute reconstruction loss
         rec_loss = self.loss_rec(x, x_hat)
-        perf_loss = self.loss_rec(p, p_hat)
+
+        # Performance prediction (skip entirely when perf is disabled)
+        if self._perf_enabled:
+            pz = z[:, : self.perf_dim]
+            p_hat = self.predictor(torch.cat([pz, c], dim=-1))
+            perf_loss = self.loss_rec(p, p_hat)
+        else:
+            perf_loss = torch.tensor(0.0, device=x.device)
 
         # Volume loss (geometric mean of stds, frozen for pruned dims)
         s = self._frozen_std.clone()
@@ -976,7 +987,7 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
 
         # Compute NMSEs
         nmse_rec = rec_loss / self._data_var
-        nmse_perf = perf_loss / self._perf_var
+        nmse_perf = perf_loss / self._perf_var if self._perf_enabled else torch.tensor(0.0)
 
         # Store for logging
         self._current_nmse_rec = nmse_rec.item()
@@ -987,13 +998,15 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
 
         # Joint constraint logic: optimize rec+perf together until both
         # are satisfied, then switch to volume optimization.
-        if nmse_rec > self.nmse_threshold_rec or nmse_perf > self.nmse_threshold_perf:
-            # At least one constraint violated - optimize both jointly
+        # When perf is disabled, only the rec constraint matters.
+        rec_violated = nmse_rec > self.nmse_threshold_rec
+        perf_violated = self._perf_enabled and nmse_perf > self.nmse_threshold_perf
+        if rec_violated or perf_violated:
             self._vol_active = False
             return rec_loss + perf_loss
-        # BOTH constraints satisfied - optimize volume
+        # All active constraints satisfied - optimize volume
         self._vol_active = True
-        return vol_loss + rec_loss + perf_loss
+        return vol_loss
 
     @torch.no_grad()
     def _prune_step(self, epoch: int) -> None:
