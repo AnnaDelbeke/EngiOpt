@@ -260,7 +260,7 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         s = self._frozen_std.clone()
         if (~self._p).any():
             s[~self._p] = z[:, ~self._p].std(0)
-        vol_loss = torch.exp(torch.log(s).mean())
+        vol_loss = torch.exp(torch.log(s + 1e-12).mean())
 
         return torch.stack([self.loss_rec(x, x_hat), vol_loss])
 
