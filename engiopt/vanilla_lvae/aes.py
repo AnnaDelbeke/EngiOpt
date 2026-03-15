@@ -992,8 +992,10 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
             return rec_loss
         if nmse_perf > self.nmse_threshold_perf:
             # Reconstruction OK, performance violated - fix performance
+            # Keep rec_loss as stabilizer to prevent encoder drift that
+            # would push reconstruction back above threshold (oscillation).
             self._vol_active = False
-            return perf_loss
+            return perf_loss + rec_loss
         # BOTH constraints satisfied - optimize volume
         self._vol_active = True
         return vol_loss
