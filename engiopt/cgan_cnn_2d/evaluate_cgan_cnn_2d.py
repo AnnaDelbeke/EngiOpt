@@ -15,6 +15,7 @@ import tyro
 from engiopt import metrics
 from engiopt.cgan_cnn_2d.cgan_cnn_2d import Generator
 from engiopt.dataset_sample_conditions import sample_conditions
+from engiopt.transforms import get_scalar_condition_keys
 import wandb
 
 
@@ -115,7 +116,7 @@ if __name__ == "__main__":
     ckpt_path = os.path.join(artifact_dir, "generator.pth")
     ckpt = th.load(ckpt_path, map_location=th.device(device))
     model = Generator(
-        latent_dim=run.config["latent_dim"], n_conds=len(problem.conditions_keys), design_shape=problem.design_space.shape
+        latent_dim=run.config["latent_dim"], n_conds=len(get_scalar_condition_keys(problem, problem.dataset["test"])), design_shape=problem.design_space.shape
     )
     model.load_state_dict(ckpt["generator"])
     model.eval()  # Set to evaluation mode
@@ -299,9 +300,10 @@ if __name__ == "__main__":
     per_sample_keys = ["iog_list", "cog_list", "fog_list", "viol_list"]
     per_sample_data = {k: np.array(metrics_dict[k]) for k in per_sample_keys if k in metrics_dict}
     # Include condition values and generated designs for condition-stratified analysis
-    cond_array = np.column_stack([np.array(sampled_conditions[c]) for c in sampled_conditions.column_names])
+    scalar_cols = [c for c in sampled_conditions.column_names if np.asarray(sampled_conditions[0][c]).ndim == 0]
+    cond_array = np.column_stack([np.array(sampled_conditions[c]) for c in scalar_cols])
     per_sample_data["conditions"] = cond_array
-    per_sample_data["condition_names"] = np.array(sampled_conditions.column_names)
+    per_sample_data["condition_names"] = np.array(scalar_cols)
     per_sample_data["gen_designs"] = gen_designs_np
     per_sample_data["ref_designs"] = sampled_designs_np
     if per_sample_data:

@@ -36,11 +36,12 @@ from torchvision.models import vgg16
 from torchvision.models import VGG16_Weights
 import tqdm
 import tyro
-import wandb
 
 from engiopt.transforms import drop_constant
+from engiopt.transforms import get_scalar_condition_keys
 from engiopt.transforms import normalize
 from engiopt.transforms import resize_to
+import wandb
 
 # URL and checkpoint for LPIPS model
 URL_MAP = {"vgg_lpips": "https://heibox.uni-heidelberg.de/f/607503859c864bc1b30b/?dl=1"}
@@ -1371,7 +1372,8 @@ if __name__ == "__main__":
     # Now we assume the dataset is of shape (N, C, H, W) and work from there
     args.image_channels = training_ds["optimal_upsampled"][:].shape[1]
     args.latent_size = args.image_size // (2 ** (len(args.encoder_channels) - 2))
-    conditions = problem.conditions_keys
+    # Filter to scalar-only conditions (exclude image conditions and keys not in dataset)
+    conditions = get_scalar_condition_keys(problem, training_ds, drop_constants=False)
 
     # Optionally drop condition columns that are constant like overhang_constraint in beams2d
     if args.drop_constant_conditions:
@@ -1419,11 +1421,11 @@ if __name__ == "__main__":
         )
         val_ds = val_ds.remove_columns("optimal_design")
 
-        # Optionally drop condition columns that are constant like overhang_constraint in beams2d
-        if args.drop_constant_conditions:
-            to_drop = [c for c in problem.conditions_keys if c not in conditions]
-            if to_drop:
-                val_ds = val_ds.remove_columns(to_drop)
+        # Drop condition columns not used in training (image conditions, constants, etc.)
+        val_scalar_keys = get_scalar_condition_keys(problem, val_ds, drop_constants=False)
+        to_drop = [c for c in val_scalar_keys if c not in conditions]
+        if to_drop:
+            val_ds = val_ds.remove_columns(to_drop)
 
         # If enabled, normalize using training mean/std (computed above)
         if args.normalize_conditions:
@@ -1833,7 +1835,7 @@ if __name__ == "__main__":
                         img = tensor.cpu().numpy().reshape(design_shape[0], design_shape[1])  # Extract x and y coordinates
                         dc = desired_conds[j].cpu()
                         axes[j].imshow(img)  # Scatter plot
-                        title = [(conditions[i][0], f"{dc[i]:.2f}") for i in range(n_conds)]
+                        title = [(conditions[i], f"{dc[i]:.2f}") for i in range(n_conds)]
                         title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
                         axes[j].title.set_text(title_string)  # Set title
                         axes[j].set_xticks([])  # Hide x ticks

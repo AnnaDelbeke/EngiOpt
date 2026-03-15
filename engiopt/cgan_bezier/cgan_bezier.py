@@ -20,6 +20,7 @@ from torch import nn
 import torch.nn.functional as f
 import tyro
 
+from engiopt.transforms import get_scalar_condition_keys
 import wandb
 
 if TYPE_CHECKING:
@@ -452,6 +453,7 @@ if __name__ == "__main__":
     n_data_points = problem.design_space["coords"].shape[1]  # for airfoil, 192
 
     # The Discriminator uses shape [N, 2, #points].
+    scalar_cond_keys = get_scalar_condition_keys(problem, problem.dataset["train"])
     problem_dataset = problem.dataset.with_format("torch")["train"]
     design_scalar_keys = list(problem_dataset["optimal_design"][0].keys())
     design_scalar_keys.remove("coords")
@@ -460,7 +462,7 @@ if __name__ == "__main__":
     training_ds = th.utils.data.TensorDataset(
         th.stack(coords_set),
         th.stack(design_scalars).unsqueeze(1),
-        *[problem_dataset[key][:] for key, _ in problem.conditions],
+        *[problem_dataset[key][:] for key in scalar_cond_keys],
     )
 
     cond_tensors = th.stack(training_ds.tensors[2:])
@@ -481,7 +483,7 @@ if __name__ == "__main__":
     discriminator = Discriminator(
         latent_dim=args.latent_dim,
         design_scalars=len(design_scalar_keys),
-        num_conds=len(problem.conditions_keys),
+        num_conds=len(scalar_cond_keys),
         design_shape=problem.design_space["coords"].shape,
         conds_normalizer=conds_normalizer,
         design_scalars_normalizer=design_scalars_normalizer,
@@ -490,7 +492,7 @@ if __name__ == "__main__":
     generator = Generator(
         latent_dim=args.latent_dim,
         noise_dim=args.noise_dim,
-        num_conds=len(problem.conditions_keys),
+        num_conds=len(scalar_cond_keys),
         n_control_points=bezier_control_pts,
         n_data_points=n_data_points,
         conds_normalizer=conds_normalizer,

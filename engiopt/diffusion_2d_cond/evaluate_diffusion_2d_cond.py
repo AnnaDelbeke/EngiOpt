@@ -17,6 +17,7 @@ from engiopt import metrics
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.diffusion_2d_cond.diffusion_2d_cond import beta_schedule
 from engiopt.diffusion_2d_cond.diffusion_2d_cond import DiffusionSampler
+from engiopt.transforms import get_scalar_condition_keys
 import wandb
 
 
@@ -127,7 +128,7 @@ if __name__ == "__main__":
         up_block_types=("UpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D"),
         layers_per_block=run.config["layers_per_block"],
         transformer_layers_per_block=1,
-        encoder_hid_dim=len(problem.conditions_keys),
+        encoder_hid_dim=len(get_scalar_condition_keys(problem, problem.dataset["test"])),
         only_cross_attention=True,
     ).to(device)
 
@@ -327,9 +328,10 @@ if __name__ == "__main__":
     # Save per-sample data to .npz for detailed analysis (e.g., distribution plots)
     per_sample_keys = ["iog_list", "cog_list", "fog_list", "viol_list"]
     per_sample_data = {k: np.array(metrics_dict[k]) for k in per_sample_keys if k in metrics_dict}
-    cond_array = np.column_stack([np.array(sampled_conditions[c]) for c in sampled_conditions.column_names])
+    scalar_cols = [c for c in sampled_conditions.column_names if np.asarray(sampled_conditions[0][c]).ndim == 0]
+    cond_array = np.column_stack([np.array(sampled_conditions[c]) for c in scalar_cols])
     per_sample_data["conditions"] = cond_array
-    per_sample_data["condition_names"] = np.array(sampled_conditions.column_names)
+    per_sample_data["condition_names"] = np.array(scalar_cols)
     per_sample_data["gen_designs"] = gen_designs_np
     per_sample_data["ref_designs"] = sampled_designs_np
     if per_sample_data:

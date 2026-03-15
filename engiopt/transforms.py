@@ -5,6 +5,7 @@ from collections.abc import Callable
 from datasets import Dataset
 from engibench.core import Problem
 from gymnasium import spaces
+import numpy as np
 import torch as th
 import torch.nn.functional as f
 
@@ -31,6 +32,41 @@ def resize_to(data: th.Tensor, h: int, w: int, mode: str = "bicubic") -> th.Tens
     if data.ndim == low_dim:
         data = data.unsqueeze(1)  # (B, 1, H, W)
     return f.interpolate(data, size=(h, w), mode=mode)
+
+
+def get_scalar_condition_keys(problem: Problem, dataset: Dataset, *, drop_constants: bool = True) -> list[str]:
+    """Return condition keys that are scalar, present in dataset, and (optionally) non-constant.
+
+    Filters ``problem.conditions_keys`` to only those that:
+    1. Exist as columns in *dataset*.
+    2. Are scalar-valued (``ndim == 0``).
+    3. (When *drop_constants* is True) Have non-zero standard deviation.
+
+    Args:
+        problem: An EngiBench problem instance.
+        dataset: A HuggingFace Dataset split (e.g. ``problem.dataset["train"]``).
+        drop_constants: If True, drop columns whose std is 0 across the dataset.
+
+    Returns:
+        A list of condition key names suitable for use as model inputs.
+    """
+    scalar_keys: list[str] = []
+    for key in problem.conditions_keys:
+        if key not in dataset.column_names:
+            continue
+        if np.asarray(dataset[0][key]).ndim > 0:
+            continue  # skip image / array conditions
+        scalar_keys.append(key)
+
+    if drop_constants and scalar_keys:
+        conds = th.stack([th.as_tensor(dataset[c][:]).float() for c in scalar_keys], dim=1)
+        std = conds.std(dim=0)
+        dropped = [c for i, c in enumerate(scalar_keys) if std[i] == 0]
+        if dropped:
+            print(f"Info: Dropping constant scalar conditions (std=0): {dropped}")
+        scalar_keys = [c for i, c in enumerate(scalar_keys) if std[i] > 0]
+
+    return scalar_keys
 
 
 def normalize(ds: Dataset, condition_names: list[str]) -> tuple[Dataset, th.Tensor, th.Tensor]:

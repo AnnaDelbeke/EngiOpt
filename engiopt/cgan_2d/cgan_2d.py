@@ -19,6 +19,7 @@ from torch import nn
 import tqdm
 import tyro
 
+from engiopt.transforms import get_scalar_condition_keys
 import wandb
 
 
@@ -140,7 +141,8 @@ if __name__ == "__main__":
 
     design_shape = problem.design_space.shape
     conditions = problem.conditions
-    n_conds = len(conditions)
+    scalar_cond_keys = get_scalar_condition_keys(problem, problem.dataset["train"])
+    n_conds = len(scalar_cond_keys)
 
     # Logging
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
@@ -177,7 +179,7 @@ if __name__ == "__main__":
     training_ds = problem.dataset.with_format("torch", device=device)["train"]
 
     training_ds = th.utils.data.TensorDataset(
-        training_ds["optimal_design"][:].flatten(1), *[training_ds[key][:] for key in problem.conditions_keys]
+        training_ds["optimal_design"][:].flatten(1), *[training_ds[key][:] for key in scalar_cond_keys]
     )
     dataloader = th.utils.data.DataLoader(
         training_ds,
@@ -280,7 +282,7 @@ if __name__ == "__main__":
                         img = tensor.cpu().numpy().reshape(design_shape[0], design_shape[1])  # Extract x and y coordinates
                         dc = desired_conds[j].cpu()
                         axes[j].imshow(img)  # Scatter plot
-                        title = [(conditions[i][0], f"{dc[i]:.2f}") for i in range(n_conds)]
+                        title = [(scalar_cond_keys[i], f"{dc[i]:.2f}") for i in range(n_conds)]
                         title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
                         axes[j].title.set_text(title_string)  # Set title
                         axes[j].set_xticks([])  # Hide x ticks

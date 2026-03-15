@@ -23,6 +23,7 @@ import tqdm
 import tyro
 
 from engiopt.transforms import flatten_dict_factory
+from engiopt.transforms import get_scalar_condition_keys
 import wandb
 
 if TYPE_CHECKING:
@@ -181,7 +182,7 @@ def prepare_data(problem: Problem, device: th.device) -> tuple[th.utils.data.Ten
 
     training_ds = th.utils.data.TensorDataset(
         transform(training_ds["optimal_design"][:]),
-        *[training_ds[key][:] for key in problem.conditions_keys],
+        *[training_ds[key][:] for key in get_scalar_condition_keys(problem, training_ds)],
     )
 
     # Create condition normalizer
@@ -213,7 +214,8 @@ if __name__ == "__main__":
         dummy_design, _ = problem.random_design()
         design_shape = spaces.flatten(problem.design_space, dummy_design).shape
     conditions = problem.conditions
-    n_conds = len(conditions)
+    scalar_cond_keys = get_scalar_condition_keys(problem, problem.dataset["train"])
+    n_conds = len(scalar_cond_keys)
 
     # Logging
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
@@ -360,7 +362,7 @@ if __name__ == "__main__":
                         ax.figure.canvas.draw()
                         img = np.array(fig.canvas.renderer.buffer_rgba())
                         axes[j].imshow(img)
-                        title = [(conditions[i][0], f"{dc[i]:.2f}") for i in range(n_conds)]
+                        title = [(scalar_cond_keys[i], f"{dc[i]:.2f}") for i in range(n_conds)]
                         title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
                         axes[j].title.set_text(title_string)  # Set title
                         axes[j].set_xticks([])  # Hide x ticks

@@ -16,6 +16,7 @@ from engiopt import metrics
 from engiopt.cgan_1d.cgan_1d import Generator
 from engiopt.cgan_1d.cgan_1d import prepare_data
 from engiopt.dataset_sample_conditions import sample_conditions
+from engiopt.transforms import get_scalar_condition_keys
 import wandb
 
 
@@ -98,7 +99,7 @@ if __name__ == "__main__":
 
     model = Generator(
         latent_dim=run.config["latent_dim"],
-        n_conds=len(problem.conditions_keys),
+        n_conds=len(get_scalar_condition_keys(problem, problem.dataset["test"])),
         design_shape=design_shape,
         design_normalizer=design_normalizer,
         conds_normalizer=conds_normalizer,

@@ -24,6 +24,7 @@ import tyro
 
 from engiopt.metrics import dpp_diversity
 from engiopt.metrics import mmd
+from engiopt.transforms import get_scalar_condition_keys
 import wandb
 
 
@@ -452,8 +453,9 @@ if __name__ == "__main__":
         raise ValueError(f"Expected 3D design shape, got {design_shape}")
 
     conditions = problem.conditions
-    n_conds = len(conditions)
-    condition_names = [cond[0] for cond in conditions]
+    scalar_cond_keys = get_scalar_condition_keys(problem, problem.dataset["train"])
+    n_conds = len(scalar_cond_keys)
+    condition_names = scalar_cond_keys
 
     # Setup logging
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
@@ -510,7 +512,7 @@ if __name__ == "__main__":
 
     # Extract 3d designs and conditions
     designs_3d = training_ds["optimal_design"][:]
-    condition_tensors = [training_ds[key][:] for key in problem.conditions_keys]
+    condition_tensors = [training_ds[key][:] for key in scalar_cond_keys]
 
     training_ds = th.utils.data.TensorDataset(designs_3d, *condition_tensors)
     dataloader = th.utils.data.DataLoader(

@@ -18,6 +18,7 @@ from torch.nn import functional
 import tqdm
 import tyro
 
+from engiopt.transforms import get_scalar_condition_keys
 import wandb
 
 if TYPE_CHECKING:
@@ -264,7 +265,8 @@ if __name__ == "__main__":
 
     # Loss function
     adversarial_loss: th.nn.Module = th.nn.MSELoss()
-    encoder_hid_dim = len(problem.conditions_keys)
+    scalar_cond_keys = get_scalar_condition_keys(problem, problem.dataset["train"])
+    encoder_hid_dim = len(scalar_cond_keys)
     # Initialize UNet from Huggingface
     model = UNet2DConditionModel(
         sample_size=design_shape,
@@ -292,9 +294,9 @@ if __name__ == "__main__":
     filtered_ds_min = filtered_ds.min()
     filtered_ds_norm = (filtered_ds - filtered_ds_min) / (filtered_ds_max - filtered_ds_min)
     training_ds = th.utils.data.TensorDataset(
-        filtered_ds_norm.flatten(1), *[training_ds[key][:] for key in problem.conditions_keys]
+        filtered_ds_norm.flatten(1), *[training_ds[key][:] for key in scalar_cond_keys]
     )
-    cond_tensors = th.stack(training_ds.tensors[1 : len(problem.conditions_keys) + 1])
+    cond_tensors = th.stack(training_ds.tensors[1 : len(scalar_cond_keys) + 1])
     conds_min = cond_tensors.amin(dim=tuple(range(1, cond_tensors.ndim)))
     conds_max = cond_tensors.amax(dim=tuple(range(1, cond_tensors.ndim)))
 
@@ -412,7 +414,7 @@ if __name__ == "__main__":
                         img = tensor.cpu().numpy()  # Extract x and y coordinates
                         dc = hidden_states[j, 0, :].cpu()
                         axes[j].imshow(img[0])  # image plot
-                        title = [(problem.conditions_keys[i], f"{dc[i]:.2f}") for i in range(len(problem.conditions_keys))]
+                        title = [(scalar_cond_keys[i], f"{dc[i]:.2f}") for i in range(encoder_hid_dim)]
                         title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
                         axes[j].title.set_text(title_string)  # Set title
                         axes[j].set_xticks([])  # Hide x ticks
