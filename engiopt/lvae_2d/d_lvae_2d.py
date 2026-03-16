@@ -49,6 +49,7 @@ from engiopt.lvae_core import create_constraint_handler
 from engiopt.lvae_core import SNLinearCombo
 from engiopt.lvae_core import spectral_norm_conv
 from engiopt.lvae_core import TrueSNDeconv2DCombo
+from engiopt.transforms import get_performance_target
 from engiopt.transforms import get_scalar_condition_keys
 import wandb
 
@@ -539,15 +540,15 @@ if __name__ == "__main__":
     # Extract designs, conditions, and performance
     x_train = train_ds["optimal_design"][:].unsqueeze(1)
     c_train = th.stack([train_ds[key][:] for key in scalar_cond_keys], dim=-1)
-    p_train = train_ds[problem.objectives_keys[0]][:].unsqueeze(-1)  # (N, 1)
+    p_train = get_performance_target(problem, train_ds)
 
     x_val = val_ds["optimal_design"][:].unsqueeze(1)
     c_val = th.stack([val_ds[key][:] for key in scalar_cond_keys], dim=-1)
-    p_val = val_ds[problem.objectives_keys[0]][:].unsqueeze(-1)
+    p_val = get_performance_target(problem, val_ds)
 
     x_test = test_ds["optimal_design"][:].unsqueeze(1)
     c_test = th.stack([test_ds[key][:] for key in scalar_cond_keys], dim=-1)
-    p_test = test_ds[problem.objectives_keys[0]][:].unsqueeze(-1)
+    p_test = get_performance_target(problem, test_ds)
 
     # Scale performance values using RobustScaler
     p_scaler = RobustScaler()

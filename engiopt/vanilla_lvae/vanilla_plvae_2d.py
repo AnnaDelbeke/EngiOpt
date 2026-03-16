@@ -28,6 +28,7 @@ from torch.utils.data import TensorDataset
 import tqdm
 import tyro
 
+from engiopt.transforms import get_performance_target
 from engiopt.transforms import get_scalar_condition_keys
 from engiopt.vanilla_lvae.aes import InterpretablePerfLeastVolumeAE_DP
 from engiopt.vanilla_lvae.components import Encoder2D
@@ -240,11 +241,11 @@ if __name__ == "__main__":
     # Extract designs, conditions, and performance
     x_train = train_ds["optimal_design"][:].unsqueeze(1)
     c_train = th.stack([train_ds[key][:] for key in scalar_cond_keys], dim=-1)
-    p_train = train_ds[problem.objectives_keys[0]][:].unsqueeze(-1)  # (N, 1)
+    p_train = get_performance_target(problem, train_ds)
 
     x_val = val_ds["optimal_design"][:].unsqueeze(1)
     c_val = th.stack([val_ds[key][:] for key in scalar_cond_keys], dim=-1)
-    p_val = val_ds[problem.objectives_keys[0]][:].unsqueeze(-1)
+    p_val = get_performance_target(problem, val_ds)
 
     # Scale performance values using RobustScaler
     p_scaler = RobustScaler()

@@ -38,9 +38,11 @@ from torch.utils.data import DataLoader
 from torch.utils.data import TensorDataset
 import tqdm
 import tyro
-import wandb
 
-from engiopt.lvae_core import InterpretableDesignLeastVolumeAE_DP, SNLinearCombo
+from engiopt.lvae_core import InterpretableDesignLeastVolumeAE_DP
+from engiopt.lvae_core import SNLinearCombo
+from engiopt.transforms import get_performance_target
+import wandb
 
 
 @dataclass
@@ -544,15 +546,15 @@ if __name__ == "__main__":
     # Extract designs, conditions, and performance (1D designs don't need unsqueeze for channel dim)
     x_train = train_ds["optimal_design"][:]
     c_train = th.stack([train_ds[key][:] for key in problem.conditions_keys], dim=-1)
-    p_train = train_ds[problem.objectives_keys[0]][:].unsqueeze(-1)  # (N, 1)
+    p_train = get_performance_target(problem, train_ds)
 
     x_val = val_ds["optimal_design"][:]
     c_val = th.stack([val_ds[key][:] for key in problem.conditions_keys], dim=-1)
-    p_val = val_ds[problem.objectives_keys[0]][:].unsqueeze(-1)
+    p_val = get_performance_target(problem, val_ds)
 
     x_test = test_ds["optimal_design"][:]
     c_test = th.stack([test_ds[key][:] for key in problem.conditions_keys], dim=-1)
-    p_test = test_ds[problem.objectives_keys[0]][:].unsqueeze(-1)
+    p_test = get_performance_target(problem, test_ds)
 
     # Scale performance values using RobustScaler
     from sklearn.preprocessing import RobustScaler

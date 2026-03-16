@@ -34,14 +34,13 @@ from torch.utils.data import TensorDataset
 import tqdm
 import tyro
 
-from engiopt.lvae_core import (
-    ConstraintHandler,
-    ConstraintLosses,
-    ConstraintThresholds,
-    InterpretableDesignLeastVolumeAE_DP,
-    SNLinearCombo,
-    create_constraint_handler,
-)
+from engiopt.lvae_core import ConstraintHandler
+from engiopt.lvae_core import ConstraintLosses
+from engiopt.lvae_core import ConstraintThresholds
+from engiopt.lvae_core import create_constraint_handler
+from engiopt.lvae_core import InterpretableDesignLeastVolumeAE_DP
+from engiopt.lvae_core import SNLinearCombo
+from engiopt.transforms import get_performance_target
 import wandb
 
 
@@ -596,14 +595,14 @@ if __name__ == "__main__":
         if n_conds > 0
         else th.empty(len(train_ds), 0)
     )
-    p_train = train_ds[problem.objectives_keys[0]][:].unsqueeze(-1)
+    p_train = get_performance_target(problem, train_ds)
 
     coords_val = th.stack([val_ds[i]["optimal_design"]["coords"] for i in range(len(val_ds))])
     angle_val = th.stack([val_ds[i]["optimal_design"]["angle_of_attack"] for i in range(len(val_ds))]).unsqueeze(-1)
     c_val = (
         th.stack([val_ds[key][:] for key in problem.conditions_keys], dim=-1) if n_conds > 0 else th.empty(len(val_ds), 0)
     )
-    p_val = val_ds[problem.objectives_keys[0]][:].unsqueeze(-1)
+    p_val = get_performance_target(problem, val_ds)
 
     p_scaler = RobustScaler()
     p_train_scaled = th.from_numpy(p_scaler.fit_transform(p_train.numpy())).to(p_train.dtype)

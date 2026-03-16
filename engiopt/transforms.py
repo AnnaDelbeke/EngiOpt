@@ -69,6 +69,35 @@ def get_scalar_condition_keys(problem: Problem, dataset: Dataset, *, drop_consta
     return scalar_keys
 
 
+def get_performance_target(problem: Problem, dataset: Dataset) -> th.Tensor:
+    """Build a scalar performance target for each sample.
+
+    For single-objective problems this returns ``dataset[objectives_keys[0]]``
+    directly.  For multi-objective problems with a ``weight`` condition
+    (e.g. thermoelastic2d) it returns the weighted sum used by the optimizer:
+    ``weight * obj[0] + (1 - weight) * obj[1]``.
+
+    Returns:
+        Tensor of shape ``(N, 1)``.
+    """
+    n_objs = len(problem.objectives_keys)
+    if n_objs == 1:
+        return th.as_tensor(dataset[problem.objectives_keys[0]][:]).float().unsqueeze(-1)
+
+    # Multi-objective: compute weighted sum
+    obj_tensors = [th.as_tensor(dataset[k][:]).float() for k in problem.objectives_keys]
+
+    if "weight" in dataset.column_names:
+        w = th.as_tensor(dataset["weight"][:]).float()
+        perf = w * obj_tensors[0] + (1.0 - w) * obj_tensors[1]
+    else:
+        # Equal weighting fallback
+        perf = th.stack(obj_tensors, dim=-1).mean(dim=-1)
+
+    print(f"Multi-objective performance target: weighted sum of {problem.objectives_keys[:2]}")
+    return perf.unsqueeze(-1)
+
+
 def normalize(ds: Dataset, condition_names: list[str]) -> tuple[Dataset, th.Tensor, th.Tensor]:
     """Normalize specified condition columns with global mean/std."""
     # stack condition columns into a single tensor (N, C) on CPU
