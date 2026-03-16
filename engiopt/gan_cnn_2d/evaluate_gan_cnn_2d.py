@@ -287,6 +287,10 @@ if __name__ == "__main__":
         run.summary["eval/iog_iqr"] = metrics_dict.get("iog_iqr")
         run.summary["eval/cog_iqr"] = metrics_dict.get("cog_iqr")
         run.summary["eval/fog_iqr"] = metrics_dict.get("fog_iqr")
+        run.summary["eval/iog_var"] = metrics_dict.get("iog_var")
+        run.summary["eval/cog_var"] = metrics_dict.get("cog_var")
+        run.summary["eval/fog_var"] = metrics_dict.get("fog_var")
+        run.summary["eval/viol"] = metrics_dict.get("viol")
         run.summary["eval/mmd_sigma"] = metrics_dict.get("mmd_sigma")
         run.summary.update()
 

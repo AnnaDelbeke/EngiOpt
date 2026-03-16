@@ -347,6 +347,9 @@ def metrics(  # noqa: PLR0915
             - "iog_iqr": IQR of Initial Optimality Gap (float).
             - "cog_iqr": IQR of Cumulative Optimality Gap (float).
             - "fog_iqr": IQR of Final Optimality Gap (float).
+            - "iog_var": Variance of Initial Optimality Gap (float).
+            - "cog_var": Variance of Cumulative Optimality Gap (float).
+            - "fog_var": Variance of Final Optimality Gap (float).
             - "iog_list": Per-sample Initial Optimality Gaps (list[float]).
             - "cog_list": Per-sample Cumulative Optimality Gaps (list[float]).
             - "fog_list": Per-sample Final Optimality Gaps (list[float]).
@@ -422,6 +425,10 @@ def metrics(  # noqa: PLR0915
     iqr_cog: float = float(np.subtract(*np.percentile(cog_arr, [75, 25])))
     iqr_fog: float = float(np.subtract(*np.percentile(fog_arr, [75, 25])))
 
+    var_iog: float = float(np.var(iog_arr))
+    var_cog: float = float(np.var(cog_arr))
+    var_fog: float = float(np.var(fog_arr))
+
     # Compute the Maximum Mean Discrepancy (MMD) between generated and dataset designs
     # We compute the MMD on the flattened designs
     flattened_ds_designs: list[npt.NDArray] = []
@@ -453,6 +460,9 @@ def metrics(  # noqa: PLR0915
         "iog_iqr": iqr_iog,
         "cog_iqr": iqr_cog,
         "fog_iqr": iqr_fog,
+        "iog_var": var_iog,
+        "cog_var": var_cog,
+        "fog_var": var_fog,
         "iog_list": iog_list,
         "cog_list": cog_list,
         "fog_list": fog_list,
