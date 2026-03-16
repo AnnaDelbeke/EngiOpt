@@ -34,7 +34,7 @@ def resize_to(data: th.Tensor, h: int, w: int, mode: str = "bicubic") -> th.Tens
     return f.interpolate(data, size=(h, w), mode=mode)
 
 
-def get_scalar_condition_keys(problem: Problem, dataset: Dataset, *, drop_constants: bool = True) -> list[str]:
+def get_scalar_condition_keys(problem: Problem, dataset: Dataset, *, drop_constants: bool = False) -> list[str]:
     """Return condition keys that are scalar, present in dataset, and (optionally) non-constant.
 
     Filters ``problem.conditions_keys`` to only those that:
