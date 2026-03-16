@@ -1848,9 +1848,9 @@ if __name__ == "__main__":
                     wandb.log({"designs_2": wandb.Image(img_fname)})
 
                 # --------------
-                #  Save model
+                #  Save model (checkpoint every epoch for early-stopping resilience)
                 # --------------
-                if args.save_model and epoch == args.n_epochs_2 - 1 and i == len(dataloader_2) - 1:
+                if args.save_model and i == len(dataloader_2) - 1:
                     ckpt_transformer = {
                         "epoch": epoch,
                         "batches_done": batches_done,
@@ -1858,12 +1858,7 @@ if __name__ == "__main__":
                         "optimizer_transformer": opt_transformer.state_dict(),
                         "loss": loss.item(),
                     }
-
                     th.save(ckpt_transformer, "transformer.pth")
-                    if args.track:
-                        artifact_cvq = wandb.Artifact(f"{args.problem_id}_{args.algo}_transformer", type="model")
-                        artifact_cvq.add_file("transformer.pth")
-                        wandb.log_artifact(artifact_cvq, aliases=[f"seed_{args.seed}"])
 
         # Early stopping based on held-out validation loss
         if args.early_stopping:
@@ -1889,5 +1884,11 @@ if __name__ == "__main__":
                     print(f"Early stopping at epoch {epoch} | best val loss: {best_val:.6f}")
                     break
             transformer.train()
+
+    # Save transformer artifact after training loop (handles both early stopping and full training)
+    if args.save_model and args.track:
+        artifact_tr = wandb.Artifact(f"{args.problem_id}_{args.algo}_transformer", type="model")
+        artifact_tr.add_file("transformer.pth")
+        wandb.log_artifact(artifact_tr, aliases=[f"seed_{args.seed}"])
 
     wandb.finish()
