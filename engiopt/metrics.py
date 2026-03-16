@@ -23,6 +23,43 @@ if TYPE_CHECKING:
     from engibench.core import Problem
 
 
+def _numpy_config(config: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Convert list-valued condition entries to numpy arrays.
+
+    HuggingFace datasets return image-shaped conditions (e.g. 65x65 boundary
+    matrices in thermoelastic2d) as nested Python lists.  EngiBench's
+    ``optimize`` / ``simulate`` expect numpy arrays, so this helper converts
+    them in-place.
+    """
+    if config is None:
+        return None
+    return {k: np.asarray(v) if isinstance(v, list) else v for k, v in config.items()}
+
+
+def _scalar_obj(obj_values: Any, weights: npt.NDArray | None = None) -> float:
+    """Reduce a (possibly multi-objective) result to a single scalar.
+
+    For single-objective problems ``obj_values`` is already a scalar or a
+    length-1 array.  For multi-objective problems (e.g. thermoelastic2d
+    which returns ``[structural, thermal, volume_fraction]``) we compute a
+    weighted sum when *weights* is provided, otherwise fall back to the
+    first objective.
+
+    Args:
+        obj_values: Scalar or array of objective values.
+        weights: Optional weight vector (same length as obj_values).  When
+            given, the scalar is ``weights @ obj_values``.
+    """
+    arr = np.asarray(obj_values, dtype=float)
+    if arr.ndim == 0:
+        return float(arr)
+    if arr.size == 1:
+        return float(arr.flat[0])
+    if weights is not None:
+        return float(np.dot(weights[:len(arr)], arr))
+    return float(arr.flat[0])
+
+
 if sys.platform != "win32":  #  only set fork on non-Windows
     multiprocessing.set_start_method("fork", force=True)
 else:
@@ -199,17 +236,20 @@ def conditional_mmd(
     return result
 
 
-def optimality_gap(opt_history: list[OptiStep], baseline: float) -> list[float]:
+def optimality_gap(
+    opt_history: list[OptiStep], baseline: float, weights: npt.NDArray | None = None
+) -> list[float]:
     """Compute the optimality gap of an optimization history.
 
     Args:
         opt_history (list[OptiStep]): The optimization history.
         baseline (float): The baseline value to compare against.
+        weights: Optional objective weights for multi-objective problems.
 
     Returns:
         list[float]: The optimality gap at each step in opt_history.
     """
-    return [opt.obj_values - baseline for opt in opt_history]
+    return [_scalar_obj(opt.obj_values, weights) - baseline for opt in opt_history]
 
 
 def simulate_failure_ratio(  # noqa: C901
@@ -279,7 +319,7 @@ def simulate_failure_ratio(  # noqa: C901
     return failure_count / len(gen_designs)  # Return the failure ratio
 
 
-def metrics(
+def metrics(  # noqa: PLR0915
     problem: Problem,
     gen_designs: npt.NDArray,
     dataset_designs: npt.NDArray,
@@ -317,27 +357,42 @@ def metrics(
     """
     n_samples = len(gen_designs)
 
+    # Build per-sample objective weights for multi-objective problems.
+    # For thermoelastic2d "weight" trades off structural vs thermal compliance.
+    n_objs = len(problem.objectives_keys)
+
     cog_list = []
     iog_list = []
     fog_list = []
     viol_list = []
     for i in range(n_samples):
-        conditions = sampled_conditions[i] if sampled_conditions is not None else None
+        conditions = _numpy_config(sampled_conditions[i]) if sampled_conditions is not None else None
         if isinstance(problem.design_space, spaces.Dict):
             # Need to unflatten the design to be used for optimization or simulation
             unflattened_design = spaces.unflatten(problem.design_space, gen_designs[i])
         else:
             unflattened_design = gen_designs[i]
 
+        # Per-sample objective weights (only relevant for multi-objective problems)
+        obj_weights: npt.NDArray | None = None
+        if n_objs > 1 and conditions is not None and "weight" in conditions:
+            w = float(conditions["weight"])
+            # [structural, thermal, volume_fraction] -> weight on first two, 0 on rest
+            obj_weights = np.zeros(n_objs)
+            obj_weights[0] = w
+            obj_weights[1] = 1.0 - w
+
         problem.reset(seed=42)  # Reset the problem state before optimization/simulation
         _, opt_history = problem.optimize(unflattened_design, config=conditions)
 
         problem.reset(seed=42)  # Reset again before simulating the reference optimum
-        reference_optimum = problem.simulate(dataset_designs[i], config=conditions)
-        opt_history_gaps = optimality_gap(opt_history, reference_optimum)
+        reference_optimum = _scalar_obj(problem.simulate(dataset_designs[i], config=conditions), obj_weights)
+        opt_history_gaps = optimality_gap(opt_history, reference_optimum, obj_weights)
 
         problem.reset(seed=42)  # Reset again before simulating the optimized design
-        iog_list.append(problem.simulate(unflattened_design, config=conditions) - reference_optimum)
+        iog_list.append(
+            _scalar_obj(problem.simulate(unflattened_design, config=conditions), obj_weights) - reference_optimum
+        )
         cog_list.append(np.sum(opt_history_gaps))
         fog_list.append(opt_history_gaps[-1])
 
