@@ -69,6 +69,44 @@ def get_scalar_condition_keys(problem: Problem, dataset: Dataset, *, drop_consta
     return scalar_keys
 
 
+def get_image_condition_keys(problem: Problem, dataset: Dataset) -> list[str]:
+    """Return condition keys that are image/array-valued and present in the dataset.
+
+    This is the complement of :func:`get_scalar_condition_keys` — it returns
+    keys whose first sample has ``ndim > 0`` (e.g. 65x65 boundary matrices
+    in thermoelastic2d).
+
+    Args:
+        problem: An EngiBench problem instance.
+        dataset: A HuggingFace Dataset split (e.g. ``problem.dataset["train"]``).
+
+    Returns:
+        A list of condition key names that are array-valued.
+    """
+    img_keys: list[str] = []
+    for key in problem.conditions_keys:
+        if key not in dataset.column_names:
+            continue
+        if np.asarray(dataset[0][key]).ndim > 0:
+            img_keys.append(key)
+    return img_keys
+
+
+def get_image_condition_shape(dataset: Dataset, img_keys: list[str]) -> tuple[int, ...]:
+    """Return the spatial shape of the first image condition.
+
+    Assumes all image conditions share the same spatial dimensions.
+
+    Args:
+        dataset: A HuggingFace Dataset split.
+        img_keys: Image condition key names (from :func:`get_image_condition_keys`).
+
+    Returns:
+        Shape tuple, e.g. ``(65, 65)``.
+    """
+    return tuple(np.asarray(dataset[0][img_keys[0]]).shape)
+
+
 def get_performance_target(problem: Problem, dataset: Dataset) -> th.Tensor:
     """Build a scalar performance target for each sample.
 
