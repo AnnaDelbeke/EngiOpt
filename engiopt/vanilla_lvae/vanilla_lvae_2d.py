@@ -25,6 +25,7 @@ import tyro
 from engiopt.vanilla_lvae.aes import LeastVolumeAE_DynamicPruning
 from engiopt.vanilla_lvae.components import Encoder2D
 from engiopt.vanilla_lvae.components import TrueSNDecoder2D
+from engiopt.vanilla_lvae.utils import filter_dataset_by_condition
 import wandb
 
 
@@ -87,6 +88,16 @@ class Args:
     """Dimensions to resize input images to before encoding/decoding."""
     decoder_lipschitz_scale: float = 1.0
     """Lipschitz bound for spectrally normalized decoder. Controls output scaling."""
+
+    # Dataset filtering
+    condition_filter_key: str | None = None
+    """Condition key to filter dataset on (e.g., 'weight'). None = use all data."""
+    condition_filter_value: float | None = None
+    """Exact value to match (within tolerance). Mutually exclusive with condition_filter_range."""
+    condition_filter_range: tuple[float, float] | None = None
+    """Inclusive [lo, hi] range to filter on. Overrides condition_filter_value."""
+    condition_filter_tolerance: float = 0.01
+    """Tolerance for exact-value matching."""
 
 
 def volume_weight_schedule(epoch: int, w_rec: float, w_vol: float, warmup_epochs: int, degree: float) -> th.Tensor:
@@ -185,9 +196,27 @@ if __name__ == "__main__":
     print(f"{'=' * 60}\n")
 
     # ---- DataLoader ----
-    hf = problem.dataset.with_format("torch")
-    train_ds = hf["train"]
-    val_ds = hf["val"]
+    raw_train = problem.dataset["train"]
+    raw_val = problem.dataset["val"]
+
+    if args.condition_filter_key is not None:
+        raw_train = filter_dataset_by_condition(
+            raw_train,
+            args.condition_filter_key,
+            value=args.condition_filter_value,
+            value_range=args.condition_filter_range,
+            tolerance=args.condition_filter_tolerance,
+        )
+        raw_val = filter_dataset_by_condition(
+            raw_val,
+            args.condition_filter_key,
+            value=args.condition_filter_value,
+            value_range=args.condition_filter_range,
+            tolerance=args.condition_filter_tolerance,
+        )
+
+    train_ds = raw_train.with_format("torch")
+    val_ds = raw_val.with_format("torch")
 
     x_train = train_ds["optimal_design"][:].unsqueeze(1)
     x_val = val_ds["optimal_design"][:].unsqueeze(1)
@@ -360,7 +389,14 @@ if __name__ == "__main__":
             if args.track:
                 artifact = wandb.Artifact(f"{args.problem_id}_{args.algo}", type="model")
                 artifact.add_file("vanilla_lvae.pth")
-                wandb.log_artifact(artifact, aliases=[f"seed_{args.seed}"])
+                alias = f"seed_{args.seed}"
+                if args.condition_filter_key is not None:
+                    if args.condition_filter_range is not None:
+                        lo, hi = args.condition_filter_range
+                        alias += f"_{args.condition_filter_key}_{lo}-{hi}"
+                    elif args.condition_filter_value is not None:
+                        alias += f"_{args.condition_filter_key}_{args.condition_filter_value}"
+                wandb.log_artifact(artifact, aliases=[alias])
 
     if args.track:
         wandb.finish()

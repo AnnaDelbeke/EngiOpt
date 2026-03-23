@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 
+from datasets import Dataset
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import numpy as np
 import numpy.typing as npt
@@ -19,6 +20,53 @@ from engiopt.vanilla_lvae.components import Encoder2D
 from engiopt.vanilla_lvae.components import SNMLPPredictor
 from engiopt.vanilla_lvae.components import TrueSNDecoder2D
 import wandb
+
+
+def filter_dataset_by_condition(
+    dataset: Dataset,
+    key: str,
+    value: float | None = None,
+    value_range: tuple[float, float] | None = None,
+    tolerance: float = 0.01,
+) -> Dataset:
+    """Filter a HuggingFace Dataset split by a scalar condition.
+
+    Either *value* (exact match within *tolerance*) or *value_range*
+    (inclusive bounds) must be provided.  If both are given, *value_range*
+    takes precedence.
+
+    Must be called **before** ``dataset.with_format("torch")`` because
+    HuggingFace ``Dataset.filter()`` operates on the raw (non-torch) data.
+
+    Args:
+        dataset: A HuggingFace Dataset split (e.g. ``problem.dataset["train"]``).
+        key: Scalar condition column to filter on (e.g. ``"weight"``).
+        value: Exact target value. Rows where ``|row[key] - value| < tolerance``
+            are kept.
+        value_range: Inclusive ``(lo, hi)`` range.  Rows where
+            ``lo <= row[key] <= hi`` are kept.
+        tolerance: Tolerance for exact-value matching.
+
+    Returns:
+        Filtered Dataset containing only matching rows.
+
+    Raises:
+        ValueError: If neither *value* nor *value_range* is provided, or if
+            *key* is not a column in *dataset*.
+    """
+    if key not in dataset.column_names:
+        raise ValueError(f"Condition key '{key}' not found in dataset columns: {dataset.column_names}")
+    if value is None and value_range is None:
+        raise ValueError("Either 'value' or 'value_range' must be provided for filtering.")
+
+    if value_range is not None:
+        lo, hi = value_range
+        filtered = dataset.filter(lambda row: lo <= float(row[key]) <= hi)
+    else:
+        filtered = dataset.filter(lambda row: abs(float(row[key]) - value) < tolerance)
+
+    print(f"Filtered dataset by {key}: {len(dataset)} → {len(filtered)} samples")
+    return filtered
 
 
 @dataclass
