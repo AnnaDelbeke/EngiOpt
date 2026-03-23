@@ -119,7 +119,7 @@ if __name__ == "__main__":
         wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
-            config=vars(args),
+            config={**vars(args), "design_shape": list(design_shape)},
             save_code=True,
             name=run_name,
         )
