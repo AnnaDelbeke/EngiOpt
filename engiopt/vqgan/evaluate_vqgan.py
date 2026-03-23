@@ -240,6 +240,7 @@ if __name__ == "__main__":
         from sklearn.decomposition import PCA
 
         from engiopt.vanilla_lvae.utils import encode_designs
+        from engiopt.vanilla_lvae.utils import get_active_mask
         from engiopt.vanilla_lvae.utils import load_lvae_encoder
 
         if args.compute_lv_suite:
@@ -286,7 +287,7 @@ if __name__ == "__main__":
                     device=device,
                 )
 
-                # Encode designs to latent space
+                # Encode designs to latent space and slice to active (unpruned) dims
                 z_gen = encode_designs(encoder, gen_designs_np, device)
                 z_data = encode_designs(encoder, sampled_designs_np, device)
                 print(
@@ -295,7 +296,10 @@ if __name__ == "__main__":
                 print(
                     f"  z_data: shape={z_data.shape}, NaN={np.isnan(z_data).sum()}, Inf={np.isinf(z_data).sum()}, range=[{z_data.min():.3f}, {z_data.max():.3f}]"
                 )
-                n_active = int((np.var(z_data, axis=0) > 1e-8).sum())
+                active = get_active_mask(encoder)
+                n_active = int(active.sum())
+                z_gen = z_gen[:, active]
+                z_data = z_data[:, active]
 
                 lv_sigma = metrics.compute_median_sigma(z_data)
                 lv_mmd_val = metrics.mmd(z_gen, z_data, sigma=lv_sigma)

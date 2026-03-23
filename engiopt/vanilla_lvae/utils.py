@@ -56,6 +56,23 @@ class PrunedEncoder(nn.Module):
         return z
 
 
+def get_active_mask(encoder: nn.Module) -> npt.NDArray[np.bool_]:
+    """Return a boolean mask of active (unpruned) latent dimensions.
+
+    Uses the authoritative pruning mask from PrunedEncoder when available.
+    Falls back to all-True (no pruning) for raw encoders without a mask.
+
+    Args:
+        encoder: LVAE encoder (PrunedEncoder or raw Encoder2D).
+
+    Returns:
+        Boolean array of shape (latent_dim,). True = active dimension.
+    """
+    if isinstance(encoder, PrunedEncoder):
+        return ~encoder._p.cpu().numpy()
+    return np.ones(1, dtype=bool)  # no pruning info — caller should not filter
+
+
 def load_lvae_encoder(
     problem_id: str,
     seed: int,
@@ -106,11 +123,19 @@ def load_lvae_encoder(
     perf_dim_raw = config.get("perf_dim", config["latent_dim"])
     perf_dim = config["latent_dim"] if perf_dim_raw == -1 else perf_dim_raw
 
+    # Derive design_shape from problem if not in config (older runs didn't save it)
+    if "design_shape" in config:
+        ds = tuple(config["design_shape"])
+    else:
+        ds = tuple(BUILTIN_PROBLEMS[problem_id]().design_space.shape)
+    assert len(ds) == 2, f"Expected 2D design_shape, got {ds}"
+    design_shape: tuple[int, int] = (ds[0], ds[1])
+
     lvae_config = LVAEConfig(
         latent_dim=config["latent_dim"],
         perf_dim=perf_dim,
         resize_dimensions=tuple(config["resize_dimensions"]),
-        design_shape=tuple(config.get("design_shape", (100, 100))),
+        design_shape=design_shape,
         decoder_lipschitz_scale=config.get("decoder_lipschitz_scale", 1.0),
         predictor_lipschitz_scale=config.get("predictor_lipschitz_scale", 1.0),
         predictor_hidden_dims=tuple(config.get("predictor_hidden_dims", (256, 128))),
@@ -193,8 +218,13 @@ def load_lvae_encoder_decoder(
     # decoder stays on CPU to avoid CUDA SIGFPE from spectral-norm deconvolutions.
     ckpt = th.load(os.path.join(artifact_dir, "constrained_vanilla_plvae.pth"), map_location="cpu", weights_only=False)
 
-    # Extract config — prefer caller-supplied design_shape over config value
-    design_shape_ = design_shape if design_shape is not None else tuple(config.get("design_shape", (100, 100)))
+    # Extract config — prefer caller-supplied design_shape, then config, then problem
+    if design_shape is not None:
+        design_shape_ = design_shape
+    elif "design_shape" in config:
+        design_shape_ = tuple(config["design_shape"])
+    else:
+        design_shape_ = tuple(BUILTIN_PROBLEMS[problem_id]().design_space.shape)
     resize_dimensions = tuple(config["resize_dimensions"])
     latent_dim = config["latent_dim"]
     perf_dim_raw = config.get("perf_dim", latent_dim)
@@ -246,6 +276,7 @@ def load_full_lvae(
     wandb_project: str = "engiopt",
     wandb_entity: str | None = None,
     device: th.device | str = "cpu",
+    design_shape: tuple[int, ...] | None = None,
 ) -> tuple[nn.Module, nn.Module, nn.Module, LVAEConfig]:
     """Load full LVAE (encoder, decoder, predictor) from WandB.
 
@@ -257,6 +288,9 @@ def load_full_lvae(
         wandb_project: WandB project name.
         wandb_entity: WandB entity name (None for default).
         device: Device to load model onto.
+        design_shape: Override for the design spatial dimensions (H, W).
+            If provided, used instead of the value in the training config.
+            Pass ``problem.design_space.shape`` to guarantee correctness.
 
     Returns:
         Tuple of (encoder, decoder, predictor, LVAEConfig).
@@ -281,19 +315,25 @@ def load_full_lvae(
     artifact_dir = artifact.download()
     ckpt = th.load(os.path.join(artifact_dir, "constrained_vanilla_plvae.pth"), map_location=device, weights_only=False)
 
-    # Extract config
-    design_shape = tuple(config.get("design_shape", (100, 100)))
+    # Extract config — prefer caller-supplied design_shape, then config, then problem
+    problem_inst = BUILTIN_PROBLEMS[problem_id]()
+    if design_shape is not None:
+        design_shape_ = design_shape
+    elif "design_shape" in config:
+        design_shape_ = tuple(config["design_shape"])
+    else:
+        design_shape_ = tuple(problem_inst.design_space.shape)
     resize_dimensions = tuple(config["resize_dimensions"])
     latent_dim = config["latent_dim"]
     perf_dim_raw = config.get("perf_dim", latent_dim)
     perf_dim = latent_dim if perf_dim_raw == -1 else perf_dim_raw
-    n_conds = len(BUILTIN_PROBLEMS[problem_id]().conditions_keys)
+    n_conds = len(problem_inst.conditions_keys)
 
     lvae_config = LVAEConfig(
         latent_dim=latent_dim,
         perf_dim=perf_dim,
         resize_dimensions=resize_dimensions,
-        design_shape=design_shape,
+        design_shape=design_shape_,
         decoder_lipschitz_scale=config.get("decoder_lipschitz_scale", 1.0),
         predictor_lipschitz_scale=config.get("predictor_lipschitz_scale", 1.0),
         predictor_hidden_dims=tuple(config.get("predictor_hidden_dims", (256, 128))),
@@ -303,7 +343,7 @@ def load_full_lvae(
     )
 
     # Reconstruct models
-    raw_encoder = Encoder2D(latent_dim, design_shape, resize_dimensions)
+    raw_encoder = Encoder2D(latent_dim, design_shape_, resize_dimensions)
     raw_encoder.load_state_dict(ckpt["encoder"])
 
     # Wrap with pruning mask if available in checkpoint
@@ -316,7 +356,7 @@ def load_full_lvae(
 
     decoder = TrueSNDecoder2D(
         latent_dim,
-        design_shape,
+        design_shape_,
         lipschitz_scale=config.get("decoder_lipschitz_scale", 1.0),
     )
     decoder.load_state_dict(ckpt["decoder"])

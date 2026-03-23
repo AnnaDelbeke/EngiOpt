@@ -24,6 +24,7 @@ from engiopt import metrics
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.transforms import get_scalar_condition_keys
 from engiopt.vanilla_lvae.utils import encode_designs
+from engiopt.vanilla_lvae.utils import get_active_mask
 from engiopt.vanilla_lvae.utils import load_lvae_encoder
 import wandb
 
@@ -180,9 +181,11 @@ if __name__ == "__main__":
                 device=device,
             )
             z_data = encode_designs(encoder, sampled_designs_np, device)
-            n_active = int((np.var(z_data, axis=0) > 1e-8).sum())
+            active = get_active_mask(encoder)
+            n_active = int(active.sum())
+            z_data = z_data[:, active]
             lv_sigma = metrics.compute_median_sigma(z_data)
-            encoders[label] = (encoder, z_data, lv_sigma, n_active)
+            encoders[label] = (encoder, active, z_data, lv_sigma, n_active)
             print(f"LVAE ({label}): rec={rec_t}, perf={perf_t}, active_dims={n_active}, sigma={lv_sigma:.6f}")
         except Exception as e:  # noqa: BLE001
             print(f"Failed to load LVAE ({label}): {e}")
@@ -258,8 +261,8 @@ if __name__ == "__main__":
         print(f"  Pixel-MMD: {pixel_mmd:.6f}, Pixel-DPP: {pixel_dpp:.6e}")
 
         # ── LV-space metrics (cheap) ──
-        for label, (encoder, z_data, lv_sigma, n_active) in encoders.items():
-            z_gen = encode_designs(encoder, gen_designs_np, device)
+        for label, (encoder, active, z_data, lv_sigma, n_active) in encoders.items():
+            z_gen = encode_designs(encoder, gen_designs_np, device)[:, active]
             lv_mmd = metrics.mmd(z_gen, z_data, sigma=lv_sigma)
             lv_dpp = metrics.dpp_diversity(z_gen, sigma=lv_sigma)
             lv_cond_mmd = metrics.conditional_mmd(z_gen, z_data, cond_array, sigma=lv_sigma)
