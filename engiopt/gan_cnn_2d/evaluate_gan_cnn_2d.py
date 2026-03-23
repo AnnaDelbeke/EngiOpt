@@ -146,17 +146,24 @@ if __name__ == "__main__":
         }
     )
 
+    # Per-sample data dict — accumulated during LVAE loop, saved to NPZ at the end
+    per_sample_data: dict[str, np.ndarray] = {}
+
     # Compute LV metrics for all (rec, perf) threshold combinations
     if args.lvae_seed is not None and rec_thresholds and perf_thresholds:
         from sklearn.decomposition import PCA
 
+        from engiopt.lv_metrics import compute_latent_reference_stats
+        from engiopt.lv_metrics import lv_mahalanobis_typicality
+        from engiopt.lv_metrics import lv_novelty_quality_pareto
+        from engiopt.lv_metrics import lv_volume_coverage_ratio
         from engiopt.vanilla_lvae.utils import encode_designs
         from engiopt.vanilla_lvae.utils import get_active_mask
         from engiopt.vanilla_lvae.utils import load_lvae_encoder
 
         if args.compute_lv_suite:
             from engiopt.lv_metrics import lv_dual_projection_gap
-            from engiopt.lv_metrics import lv_project_designs
+            from engiopt.lv_metrics import lv_reconstruction_residual_stats
             from engiopt.vanilla_lvae.utils import load_lvae_encoder_decoder
 
         metrics_dict["lvae_seed"] = args.lvae_seed
@@ -193,6 +200,31 @@ if __name__ == "__main__":
                 metrics_dict[f"lv_sigma{suffix}"] = lv_sigma
                 metrics_dict[f"lvae_n_active_dims{suffix}"] = n_active
 
+                # Build reference stats from full training set (not just sampled test designs)
+                train_designs_np = np.array(problem.dataset["train"]["optimal_design"])
+                z_train = encode_designs(encoder, train_designs_np, device)[:, active]
+                ref_stats = compute_latent_reference_stats(z_train)
+                mahal = lv_mahalanobis_typicality(z_gen, ref_stats)
+                metrics_dict[f"lv_mahal_mean{suffix}"] = mahal["mahal_mean"]
+                metrics_dict[f"lv_mahal_median{suffix}"] = mahal["mahal_median"]
+                metrics_dict[f"lv_plausibility_rate{suffix}"] = mahal["plausibility_rate"]
+
+                nq = lv_novelty_quality_pareto(z_gen, ref_stats)
+                metrics_dict[f"lv_nq_hypervolume{suffix}"] = nq["hypervolume"]
+
+                vol = lv_volume_coverage_ratio(z_gen, ref_stats)
+                metrics_dict[f"lv_volume_ratio{suffix}"] = vol["volume_ratio"]
+
+                # Store per-sample latent metric arrays for NPZ
+                per_sample_data[f"lv_mahal_distances{suffix}"] = mahal["mahal_distances"]
+                per_sample_data[f"lv_novelty{suffix}"] = nq["novelty"]
+                per_sample_data[f"lv_quality{suffix}"] = nq["quality"]
+
+                print(
+                    f"  Mahal: {mahal['mahal_mean']:.3f}, Plaus: {mahal['plausibility_rate']:.2%}, "
+                    f"HV: {nq['hypervolume']:.4f}, VolRatio: {vol['volume_ratio']:.3f}"
+                )
+
                 # LV metric suite: projection residual + dual gap (isolated so failures don't block basic LV metrics)
                 if args.compute_lv_suite:
                     try:
@@ -208,11 +240,13 @@ if __name__ == "__main__":
                             design_shape=problem.design_space.shape,
                         )
                         print(f"  [diag] Decoder loaded on {next(decoder.parameters()).device}", flush=True)
-                        print("  [diag] Running lv_project_designs (encode→decode)...", flush=True)
-                        proj_residuals, _ = lv_project_designs(encoder, decoder, gen_designs_np, device)
-                        print("  [diag] lv_project_designs done", flush=True)
-                        metrics_dict[f"lv_proj_residual_mean{suffix}"] = float(proj_residuals.mean())
-                        print(f"  LV-ProjRes: {proj_residuals.mean():.6f}")
+                        recon_stats = lv_reconstruction_residual_stats(encoder, decoder, gen_designs_np, device)
+                        metrics_dict[f"lv_proj_residual_mean{suffix}"] = recon_stats["residual_mean"]
+                        metrics_dict[f"lv_residual_median{suffix}"] = recon_stats["residual_median"]
+                        metrics_dict[f"lv_residual_p90{suffix}"] = recon_stats["residual_p90"]
+                        metrics_dict[f"lv_residual_std{suffix}"] = recon_stats["residual_std"]
+                        per_sample_data[f"lv_residuals{suffix}"] = recon_stats["residuals"]
+                        print(f"  LV-ProjRes: {recon_stats['residual_mean']:.6f}")
 
                         # Dual-LVAE projection gap: compare perf vs recon-only projections
                         recon_only_thresh = 1000.0
@@ -231,6 +265,9 @@ if __name__ == "__main__":
                             metrics_dict[f"lv_dual_gap_mean{suffix}"] = dual["dual_gap_mean"]
                             metrics_dict[f"lv_residual_perf_mean{suffix}"] = dual["residual_perf_mean"]
                             metrics_dict[f"lv_residual_recon_mean{suffix}"] = dual["residual_recon_mean"]
+                            per_sample_data[f"lv_dual_gap{suffix}"] = dual["dual_gap"]
+                            per_sample_data[f"lv_residual_perf{suffix}"] = dual["residual_perf"]
+                            per_sample_data[f"lv_residual_recon{suffix}"] = dual["residual_recon"]
                             print(f"  LV-DualGap: {dual['dual_gap_mean']:.6f}")
                     except Exception as e:
                         print(f"  LV suite failed: {e}")
@@ -263,11 +300,17 @@ if __name__ == "__main__":
                     run.summary[f"{prefix}/lv_dpp"] = metrics_dict.get(f"lv_dpp{suffix}")
                     run.summary[f"{prefix}/lv_sigma"] = metrics_dict.get(f"lv_sigma{suffix}")
                     run.summary[f"{prefix}/n_active_dims"] = metrics_dict.get(f"lvae_n_active_dims{suffix}")
+                    run.summary[f"{prefix}/lv_mahal_mean"] = metrics_dict.get(f"lv_mahal_mean{suffix}")
+                    run.summary[f"{prefix}/lv_plausibility_rate"] = metrics_dict.get(f"lv_plausibility_rate{suffix}")
+                    run.summary[f"{prefix}/lv_nq_hypervolume"] = metrics_dict.get(f"lv_nq_hypervolume{suffix}")
+                    run.summary[f"{prefix}/lv_volume_ratio"] = metrics_dict.get(f"lv_volume_ratio{suffix}")
                     run.summary[f"{prefix}/pca_mmd"] = metrics_dict.get(f"pca_mmd{suffix}")
                     run.summary[f"{prefix}/pca_dpp"] = metrics_dict.get(f"pca_dpp{suffix}")
                     run.summary[f"{prefix}/pca_sigma"] = metrics_dict.get(f"pca_sigma{suffix}")
                     if args.compute_lv_suite:
                         run.summary[f"{prefix}/lv_proj_residual_mean"] = metrics_dict.get(f"lv_proj_residual_mean{suffix}")
+                        run.summary[f"{prefix}/lv_residual_median"] = metrics_dict.get(f"lv_residual_median{suffix}")
+                        run.summary[f"{prefix}/lv_residual_p90"] = metrics_dict.get(f"lv_residual_p90{suffix}")
                         run.summary[f"{prefix}/lv_dual_gap_mean"] = metrics_dict.get(f"lv_dual_gap_mean{suffix}")
                         run.summary[f"{prefix}/lv_residual_perf_mean"] = metrics_dict.get(f"lv_residual_perf_mean{suffix}")
                         run.summary[f"{prefix}/lv_residual_recon_mean"] = metrics_dict.get(
@@ -299,8 +342,9 @@ if __name__ == "__main__":
         run.summary.update()
 
     # Save per-sample data to .npz for detailed analysis (e.g., distribution plots)
+    # (per_sample_data may already contain LVAE per-sample arrays accumulated during the loop above)
     per_sample_keys = ["iog_list", "cog_list", "fog_list", "viol_list"]
-    per_sample_data = {k: np.array(metrics_dict[k]) for k in per_sample_keys if k in metrics_dict}
+    per_sample_data.update({k: np.array(metrics_dict[k]) for k in per_sample_keys if k in metrics_dict})
     scalar_cols = [c for c in sampled_conditions.column_names if np.asarray(sampled_conditions[0][c]).ndim == 0]
     cond_array = np.column_stack([np.array(sampled_conditions[c]) for c in scalar_cols])
     per_sample_data["conditions"] = cond_array
@@ -312,8 +356,8 @@ if __name__ == "__main__":
         np.savez(npz_path, **per_sample_data)
         print(f"  Per-sample data saved to {npz_path}")
 
-    # Remove list-valued keys before CSV serialization (keep only scalars)
-    csv_dict = {k: v for k, v in metrics_dict.items() if not isinstance(v, list)}
+    # Remove list/array-valued keys before CSV serialization (keep only scalars)
+    csv_dict = {k: v for k, v in metrics_dict.items() if not isinstance(v, (list, np.ndarray))}
 
     # Append result row to CSV
     metrics_df = pd.DataFrame([csv_dict])
