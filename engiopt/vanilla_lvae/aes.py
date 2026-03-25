@@ -483,23 +483,11 @@ class PerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
 
 
 class ConstrainedLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
-    """Constrained least-volume autoencoder with selectable constraint modes.
+    """Constrained least-volume autoencoder with dynamic pruning.
 
-    Provides three constraint handling strategies for comparing different approaches
-    to balancing reconstruction quality and volume compression:
-
-    Modes:
-        - **one_sided**: Mutually exclusive optimization. When NMSE > threshold,
-          optimize only reconstruction. When NMSE <= threshold, optimize only volume.
-          No gradient competition, but may oscillate around threshold.
-
-        - **gated**: Additive with gating. Always optimize reconstruction.
-          Add volume loss (weighted by w_vol) only when NMSE <= threshold.
-          Stable but volume gradients may be overwhelmed.
-
-        - **gradient_balanced**: Like gated, but scale volume loss by the ratio
-          of reconstruction to volume loss magnitudes (EMA-tracked). Self-tuning
-          to ensure volume gradients are competitive with reconstruction.
+    Optimizes reconstruction until NMSE <= threshold, then adds volume
+    optimization while maintaining a reconstruction floor to prevent
+    overshoot.
 
     Uses **Normalized MSE (NMSE)** for problem-independent thresholding:
     - NMSE = MSE / Var(data)
@@ -511,9 +499,6 @@ class ConstrainedLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         optimizer: Optimizer instance.
         latent_dim: Total number of latent dimensions.
         nmse_threshold: NMSE ceiling. Default: 0.01 (R² = 0.99).
-        constraint_mode: "one_sided", "gated", or "gradient_balanced". Default: "one_sided".
-        w_vol: Volume loss weight (gated mode only). Default: 1.0.
-        ema_beta: EMA smoothing for loss tracking (gradient_balanced mode). Default: 0.9.
         eta: Smoothing parameter for volume loss. Default: 0.
         beta: EMA momentum for latent statistics. Default: 0.9.
         pruning_epoch: Epoch to start pruning. Default: 500.
@@ -531,9 +516,6 @@ class ConstrainedLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         optimizer: Optimizer,
         latent_dim: int,
         nmse_threshold: float = 0.01,
-        constraint_mode: Literal["one_sided", "gated", "gradient_balanced"] = "one_sided",
-        w_vol: float = 1.0,
-        ema_beta: float = 0.9,
         eta: float = 0,
         beta: float = 0.9,
         pruning_epoch: int = 500,
@@ -542,7 +524,6 @@ class ConstrainedLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         alpha: float = 0,
     ) -> None:
         # Parent uses weights for its loss computation, but we override loss()
-        # so we just pass a dummy value
         super().__init__(
             encoder=encoder,
             decoder=decoder,
@@ -557,24 +538,16 @@ class ConstrainedLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
             alpha=alpha,
         )
         self.nmse_threshold = nmse_threshold
-        self.constraint_mode = constraint_mode
-        self.w_vol = w_vol
-        self._ema_beta = ema_beta
 
         # Data variance for NMSE computation (must be set via set_data_variance)
         self.register_buffer("_data_var", torch.tensor(1.0))
         self._data_var_set = False
-
-        # EMA tracking for gradient balancing
-        self._rec_ema: float = 0.0
-        self._vol_ema: float = 0.0
 
         # Current state for logging
         self._current_nmse: float = 0.0
         self._current_rec_loss: float = 0.0
         self._current_vol_loss: float = 0.0
         self._vol_active: bool = False
-        self._balance_factor: float = 1.0
 
     @property
     def nmse(self) -> float:
@@ -593,13 +566,8 @@ class ConstrainedLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
 
     @property
     def vol_loss(self) -> float:
-        """Current batch volume loss (before any scaling)."""
+        """Current batch volume loss."""
         return self._current_vol_loss
-
-    @property
-    def balance_factor(self) -> float:
-        """Current gradient balance factor (gradient_balanced mode)."""
-        return self._balance_factor
 
     @property
     def data_var(self) -> float:
@@ -622,7 +590,7 @@ class ConstrainedLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         self._data_var_set = True
 
     def loss(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute loss based on selected constraint mode.
+        """Compute loss with NMSE-gated volume optimization.
 
         Args:
             x: Input batch tensor.
@@ -648,47 +616,18 @@ class ConstrainedLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         self._current_rec_loss = rec_loss.item()
         self._current_vol_loss = vol_loss.item()
 
-        # Update EMAs for gradient balancing (always update for logging)
-        self._rec_ema = self._ema_beta * self._rec_ema + (1 - self._ema_beta) * rec_loss.item()
-        self._vol_ema = self._ema_beta * self._vol_ema + (1 - self._ema_beta) * vol_loss.item()
-        self._balance_factor = self._rec_ema / (self._vol_ema + 1e-8)
-
-        # Apply constraint mode
-        if self.constraint_mode == "one_sided":
-            # Mutually exclusive: only one loss active at a time
-            if nmse > self.nmse_threshold:
-                self._vol_active = False
-                return rec_loss
-            self._vol_active = True
-            return vol_loss
-
-        if self.constraint_mode == "gated":
-            # Additive: rec always, vol only when below threshold
-            if nmse > self.nmse_threshold:
-                self._vol_active = False
-                return rec_loss
-            self._vol_active = True
-            return rec_loss + self.w_vol * vol_loss
-
-        if self.constraint_mode == "gradient_balanced":
-            # Additive with auto-scaling based on loss magnitudes
-            if nmse > self.nmse_threshold:
-                self._vol_active = False
-                return rec_loss
-            self._vol_active = True
-            return rec_loss + self._balance_factor * vol_loss
-
-        raise ValueError(f"Unknown constraint_mode: {self.constraint_mode}")
+        # Constraint logic: optimize rec until NMSE is satisfied,
+        # then add volume while keeping rec floor to prevent overshoot.
+        if nmse > self.nmse_threshold:
+            self._vol_active = False
+            return rec_loss
+        # Constraint satisfied - optimize volume with rec floor
+        self._vol_active = True
+        return vol_loss + rec_loss
 
     @torch.no_grad()
     def _prune_step(self, epoch: int) -> None:
-        """Execute pruning step unconditionally after pruning_epoch.
-
-        Pruning is decoupled from _vol_active since the volume loss already
-        only engages when the constraint is satisfied. Double-gating would
-        introduce a race condition where pruning depends on the last batch's
-        constraint state.
-        """
+        """Execute pruning unconditionally after pruning_epoch."""
         super()._prune_step(epoch)
 
 
@@ -1039,16 +978,18 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         self._current_vol_loss = vol_loss.item()
 
         # Joint constraint logic: optimize rec+perf together until both
-        # are satisfied, then switch to volume optimization.
+        # are satisfied, then add volume optimization.
         # When perf is disabled, only the rec constraint matters.
+        # rec+perf are always included to prevent volume from overshooting
+        # the threshold in a single step (volume naturally dominates).
         rec_violated = nmse_rec > self.nmse_threshold_rec
         perf_violated = self._perf_enabled and nmse_perf > self.nmse_threshold_perf
         if rec_violated or perf_violated:
             self._vol_active = False
             return rec_loss + perf_loss
-        # All active constraints satisfied - optimize volume
+        # All active constraints satisfied - optimize volume with rec+perf floor
         self._vol_active = True
-        return vol_loss
+        return vol_loss + rec_loss + perf_loss
 
     @torch.no_grad()
     def _prune_step(self, epoch: int) -> None:

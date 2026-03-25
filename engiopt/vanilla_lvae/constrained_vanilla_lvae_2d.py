@@ -70,12 +70,6 @@ class Args:
     # Constraint parameters (uses Normalized MSE = MSE / Var(data) for problem-independence)
     nmse_threshold: float = 0.05
     """NMSE ceiling. Training aims to stay at or below this threshold."""
-    constraint_mode: str = "one_sided"
-    """Constraint mode: 'one_sided' (rec or vol), 'gated' (rec + vol), 'gradient_balanced' (auto-scaled)."""
-    w_vol: float = 1.0
-    """Volume loss weight (gated mode only)."""
-    ema_beta: float = 0.9
-    """EMA smoothing for loss tracking (gradient_balanced mode)."""
 
     # Pruning parameters
     pruning_epoch: int = 500
@@ -145,16 +139,13 @@ if __name__ == "__main__":
     enc = Encoder2D(args.latent_dim, design_shape, args.resize_dimensions)
     dec = TrueSNDecoder2D(args.latent_dim, design_shape, lipschitz_scale=args.decoder_lipschitz_scale)
 
-    # Initialize constrained LVAE with selectable constraint mode
+    # Initialize constrained LVAE
     lvae = ConstrainedLeastVolumeAE_DP(
         encoder=enc,
         decoder=dec,
         optimizer=Adam(list(enc.parameters()) + list(dec.parameters()), lr=args.lr),
         latent_dim=args.latent_dim,
         nmse_threshold=args.nmse_threshold,
-        constraint_mode=args.constraint_mode,
-        w_vol=args.w_vol,
-        ema_beta=args.ema_beta,
         pruning_epoch=args.pruning_epoch,
         pruning_threshold=args.pruning_threshold,
         pruning_strategy=args.pruning_strategy,
@@ -196,11 +187,6 @@ if __name__ == "__main__":
     print(f"Latent dim: {args.latent_dim}")
     print(f"Decoder: TrueSNDecoder2D (lipschitz_scale={args.decoder_lipschitz_scale})")
     print(f"NMSE threshold: {args.nmse_threshold} (R² = {1 - args.nmse_threshold:.2%})")
-    print(f"Constraint mode: {args.constraint_mode}")
-    if args.constraint_mode == "gated":
-        print(f"  w_vol: {args.w_vol}")
-    elif args.constraint_mode == "gradient_balanced":
-        print(f"  ema_beta: {args.ema_beta}")
     print(f"Data variance: {lvae.data_var:.6f}")
     print(f"Pruning epoch: {args.pruning_epoch}")
     print(f"Pruning strategy: {args.pruning_strategy}")
@@ -247,10 +233,8 @@ if __name__ == "__main__":
                     "nmse": lvae.nmse,
                     "nmse_threshold": args.nmse_threshold,
                     "vol_active": int(lvae.vol_active),
-                    "balance_factor": lvae.balance_factor,
                     "active_dims": lvae.dim,
                     "epoch": epoch,
-                    "constraint_mode": args.constraint_mode,
                 }
                 wandb.log(log_dict)
 
