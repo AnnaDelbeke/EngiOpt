@@ -547,6 +547,36 @@ if __name__ == "__main__":
                     plt.savefig(f"images/constraint_status_{batches_done}.png")
                     plt.close()
 
+                    # Plot 6: Validation reconstruction grid
+                    n_viz = min(8, len(x_val))
+                    with th.no_grad():
+                        x_viz = x_val[:n_viz].to(device)
+                        z_viz = plvae.encode(x_viz)
+
+                        # Build condition embedding for val samples if needed
+                        viz_val_cond = None
+                        if args.conditional_decoder or cond_dim_for_predictor > 0:
+                            c_viz = c_val_scaled[:n_viz].to(device)
+                            ic_viz = ic_val[:n_viz].to(device) if ic_val is not None else None
+                            viz_val_cond = plvae._build_cond_embedding(c_viz, ic_viz)
+
+                        if args.conditional_decoder and viz_val_cond is not None:
+                            x_rec_viz = plvae.decoder(z_viz, cond=viz_val_cond).cpu().numpy()
+                        else:
+                            x_rec_viz = plvae.decode(z_viz).cpu().numpy()
+
+                    fig, axs = plt.subplots(n_viz, 2, figsize=(4, 2 * n_viz))
+                    for row in range(n_viz):
+                        axs[row, 0].imshow(x_val[row].numpy().reshape(design_shape))
+                        axs[row, 0].axis("off")
+                        axs[row, 1].imshow(x_rec_viz[row].reshape(design_shape))
+                        axs[row, 1].axis("off")
+                    axs[0, 0].set_title("Original")
+                    axs[0, 1].set_title("Reconstructed")
+                    fig.tight_layout()
+                    plt.savefig(f"images/val_recon_{batches_done}.png")
+                    plt.close()
+
                     # Log plots to wandb
                     wandb.log(
                         {
@@ -555,6 +585,7 @@ if __name__ == "__main__":
                             "norm_plot": wandb.Image(f"images/norm_{batches_done}.png"),
                             "perf_pred_vs_actual": wandb.Image(f"images/perf_pred_vs_actual_{batches_done}.png"),
                             "constraint_status": wandb.Image(f"images/constraint_status_{batches_done}.png"),
+                            "val_reconstruction": wandb.Image(f"images/val_recon_{batches_done}.png"),
                         }
                     )
 
