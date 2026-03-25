@@ -432,12 +432,18 @@ if __name__ == "__main__":
                                 return plvae.decoder(z_viz, cond=cond).cpu().numpy()
                             return plvae.decode(z_viz).cpu().numpy()
 
-                        # Generate interpolated designs (use conditions from corresponding samples)
+                        # Generate interpolated designs (interpolate both z and conditions)
+                        z_start, z_end = z[:25], th.roll(z, -1, 0)[:25]
+                        cond_start = viz_cond_emb[:25] if viz_cond_emb is not None else None
+                        cond_end = th.roll(viz_cond_emb, -1, 0)[:25] if viz_cond_emb is not None else None
                         x_ints = []
                         for alpha in [0, 0.25, 0.5, 0.75, 1]:
-                            z_ = (1 - alpha) * z[:25] + alpha * th.roll(z, -1, 0)[:25]
-                            cond_25 = viz_cond_emb[:25] if viz_cond_emb is not None else None
-                            x_ints.append(_viz_decode(z_, cond_25))
+                            z_ = (1 - alpha) * z_start + alpha * z_end
+                            if cond_start is not None and cond_end is not None:
+                                cond_ = (1 - alpha) * cond_start + alpha * cond_end
+                            else:
+                                cond_ = None
+                            x_ints.append(_viz_decode(z_, cond_))
 
                         # Generate random designs (use conditions from first 25 samples as reference)
                         z_rand = z_mean.unsqueeze(0).repeat([25, 1])
@@ -476,19 +482,25 @@ if __name__ == "__main__":
                     plt.savefig(f"images/dim_{batches_done}.png")
                     plt.close()
 
-                    # Plot 2: Interpolated designs
-                    fig, axs = plt.subplots(25, 6, figsize=(12, 25))
-                    for i_row, j in product(range(25), range(5)):
-                        axs[i_row, j + 1].imshow(x_ints[j][i_row].reshape(design_shape))
-                        axs[i_row, j + 1].axis("off")
-                        axs[i_row, j + 1].set_aspect("equal")
-                    for ax, alpha in zip(axs[0, 1:], [0, 0.25, 0.5, 0.75, 1]):
-                        ax.set_title(rf"$\alpha$ = {alpha}")
+                    # Plot 2: Interpolated designs (GT_start | alpha=0..1 | GT_end)
+                    xs_end_cpu = np.roll(xs_cpu, -1, axis=0)[:25]
+                    fig, axs = plt.subplots(25, 7, figsize=(14, 25))
                     for i_row in range(25):
                         axs[i_row, 0].imshow(xs_cpu[i_row].reshape(design_shape))
                         axs[i_row, 0].axis("off")
                         axs[i_row, 0].set_aspect("equal")
-                    axs[0, 0].set_title("groundtruth")
+                    axs[0, 0].set_title("GT start")
+                    for i_row, j in product(range(25), range(5)):
+                        axs[i_row, j + 1].imshow(x_ints[j][i_row].reshape(design_shape))
+                        axs[i_row, j + 1].axis("off")
+                        axs[i_row, j + 1].set_aspect("equal")
+                    for ax, alpha in zip(axs[0, 1:6], [0, 0.25, 0.5, 0.75, 1]):
+                        ax.set_title(rf"$\alpha$ = {alpha}")
+                    for i_row in range(25):
+                        axs[i_row, 6].imshow(xs_end_cpu[i_row].reshape(design_shape))
+                        axs[i_row, 6].axis("off")
+                        axs[i_row, 6].set_aspect("equal")
+                    axs[0, 6].set_title("GT end")
                     fig.tight_layout()
                     plt.savefig(f"images/interp_{batches_done}.png")
                     plt.close()
