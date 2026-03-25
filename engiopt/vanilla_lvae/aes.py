@@ -751,16 +751,17 @@ class InterpretablePerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: 
         self.predictor = predictor
         self.perf_dim = perf_dim
 
-    def loss(self, batch: tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> torch.Tensor:
+    def loss(self, batch: tuple[torch.Tensor, ...]) -> torch.Tensor:
         """Compute losses using only first perf_dim latents for performance prediction.
 
         Args:
-            batch: Tuple of (designs, conditions, performance_targets).
+            batch: Tuple of (designs, conditions, performance_targets) or
+                (designs, conditions, performance_targets, image_conditions).
 
         Returns:
             Tensor of shape (3,) containing [rec_loss, perf_loss, vol_loss].
         """
-        x, c, p = batch
+        x, c, p = batch[0], batch[1], batch[2]
         z = self.encode(x)
         x_hat = self.decode(z)
 
@@ -769,7 +770,10 @@ class InterpretablePerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: 
 
         # Only first perf_dim dimensions for performance prediction
         pz = z[:, : self.perf_dim]
-        p_hat = self.predictor(torch.cat([pz, c], dim=-1))
+        if c.shape[-1] > 0:
+            p_hat = self.predictor(torch.cat([pz, c], dim=-1))
+        else:
+            p_hat = self.predictor(pz)
 
         # Volume loss: pruned dims use frozen std (captured at prune time),
         # active dims use current std. This makes pruning volume-neutral.
@@ -846,6 +850,9 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         pruning_threshold: float = 0.02,
         pruning_strategy: Literal["plummet", "lognorm"] = "plummet",
         alpha: float = 0,
+        *,
+        conditional_decoder: bool = False,
+        condition_encoder: nn.Module | None = None,
     ) -> None:
         # Parent uses weights for its loss computation, but we override loss()
         super().__init__(
@@ -865,6 +872,8 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         self.perf_dim = perf_dim
         self.nmse_threshold_rec = nmse_threshold_rec
         self.nmse_threshold_perf = nmse_threshold_perf
+        self.conditional_decoder = conditional_decoder
+        self.condition_encoder = condition_encoder
 
         # Data variances for NMSE computation (must be set via set_* methods)
         self.register_buffer("_data_var", torch.tensor(1.0))
@@ -952,18 +961,48 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         self._perf_var = torch.tensor(var, device=self._perf_var.device)
         self._perf_var_set = True
 
-    def loss(self, batch: tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> torch.Tensor:
+    def _build_cond_embedding(
+        self, c_scalar: torch.Tensor, c_img: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        """Build combined condition embedding from scalar and image conditions.
+
+        Args:
+            c_scalar: Scalar conditions (B, n_scalar_conds). May have 0 columns.
+            c_img: Image conditions (B, n_img_conds, H, W) or None.
+
+        Returns:
+            Combined embedding (B, cond_dim) or None if no conditions available.
+        """
+        parts: list[torch.Tensor] = []
+        if c_scalar.shape[-1] > 0:
+            parts.append(c_scalar)
+        if c_img is not None and self.condition_encoder is not None:
+            parts.append(self.condition_encoder(c_img))
+        return torch.cat(parts, dim=-1) if parts else None
+
+    def loss(self, batch: tuple[torch.Tensor, ...]) -> torch.Tensor:
         """Compute loss with joint rec+perf constraint switching.
 
         Args:
-            batch: Tuple of (designs, conditions, performance_targets).
+            batch: Tuple of (designs, conditions, performance_targets) or
+                (designs, conditions, performance_targets, image_conditions).
 
         Returns:
             Scalar loss tensor for backpropagation.
         """
-        x, c, p = batch
+        x, c, p = batch[0], batch[1], batch[2]
+        c_img = batch[3] if len(batch) > 3 else None
+
         z = self.encode(x)
-        x_hat = self.decode(z)
+
+        # Build condition embedding (shared for decoder + predictor)
+        cond_emb = self._build_cond_embedding(c, c_img)
+
+        # Decoder: conditional or unconditional
+        if self.conditional_decoder and cond_emb is not None:
+            x_hat = self.decoder(z, cond=cond_emb)
+        else:
+            x_hat = self.decode(z)
 
         # Update moving statistics for pruning
         self._update_moving_mean(z)
@@ -974,7 +1013,10 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         # Performance prediction (skip entirely when perf is disabled)
         if self._perf_enabled:
             pz = z[:, : self.perf_dim]
-            p_hat = self.predictor(torch.cat([pz, c], dim=-1))
+            if cond_emb is not None:
+                p_hat = self.predictor(torch.cat([pz, cond_emb], dim=-1))
+            else:
+                p_hat = self.predictor(pz)
             perf_loss = self.loss_rec(p, p_hat)
         else:
             perf_loss = torch.tensor(0.0, device=x.device)

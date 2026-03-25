@@ -29,9 +29,13 @@ from torch.utils.data import TensorDataset
 import tqdm
 import tyro
 
+from engiopt.transforms import get_image_condition_keys
+from engiopt.transforms import get_image_condition_shape
 from engiopt.transforms import get_performance_target
 from engiopt.transforms import get_scalar_condition_keys
+from engiopt.transforms import rasterize_index_conditions
 from engiopt.vanilla_lvae.aes import ConstrainedPerfLeastVolumeAE_DP
+from engiopt.vanilla_lvae.components import ConditionEncoder2D
 from engiopt.vanilla_lvae.components import Encoder2D
 from engiopt.vanilla_lvae.components import SNMLPPredictor
 from engiopt.vanilla_lvae.components import TrueSNDecoder2D
@@ -98,6 +102,10 @@ class Args:
     """Hidden dimensions for the MLP predictor."""
     conditional_predictor: bool = False
     """Whether to include conditions in performance prediction (True) or use only latent codes (False)."""
+    conditional_decoder: bool = False
+    """Whether to condition the decoder on scalar + image conditions for multi-modality measurement."""
+    cond_embed_dim: int = 64
+    """Dimensionality of image condition embedding (only used when image conditions exist)."""
     decoder_lipschitz_scale: float = 1.0
     """Lipschitz bound for spectrally normalized decoder. Controls output scaling."""
     predictor_lipschitz_scale: float = 1.0
@@ -123,6 +131,14 @@ if __name__ == "__main__":
     design_shape = problem.design_space.shape
     scalar_cond_keys = get_scalar_condition_keys(problem, problem.dataset["train"])
     n_conds = len(scalar_cond_keys)
+
+    # Detect image conditions (e.g., boundary matrices in thermoelastic2d)
+    img_cond_keys = get_image_condition_keys(problem, problem.dataset["train"])
+    n_img_conds = len(img_cond_keys)
+    img_cond_shape: tuple[int, ...] | None = None
+    if n_img_conds > 0:
+        img_cond_shape = get_image_condition_shape(problem.dataset["train"], img_cond_keys)
+        print(f"Found {n_img_conds} image condition(s): {img_cond_keys}, shape={img_cond_shape}")
 
     # Logging
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
@@ -153,16 +169,42 @@ if __name__ == "__main__":
     else:
         device = th.device("cpu")
 
-    # Build encoder and decoder
+    # Build encoder (always unconditional — sees design only)
     enc = Encoder2D(args.latent_dim, design_shape, args.resize_dimensions)
-    dec = TrueSNDecoder2D(args.latent_dim, design_shape, lipschitz_scale=args.decoder_lipschitz_scale)
+
+    # Build condition encoder for image conditions (if any)
+    condition_encoder: ConditionEncoder2D | None = None
+    img_cond_embed_dim = 0
+    if n_img_conds > 0:
+        condition_encoder = ConditionEncoder2D(
+            n_img_conds=n_img_conds,
+            cond_embed_dim=args.cond_embed_dim,
+            resize_dimensions=args.resize_dimensions,
+        )
+        img_cond_embed_dim = args.cond_embed_dim
+
+    # Compute condition dimensions for decoder and predictor
+    # Scalar conditions are included when conditional_predictor is on (they get scaled)
+    # Image condition embeddings are always included when image conditions exist
+    n_scalar_for_cond = n_conds if args.conditional_predictor else 0
+
+    cond_dim_for_decoder = 0
+    if args.conditional_decoder:
+        cond_dim_for_decoder = n_scalar_for_cond + img_cond_embed_dim
+
+    cond_dim_for_predictor = n_scalar_for_cond + img_cond_embed_dim
+
+    # Build decoder (conditional when cond_dim > 0)
+    dec = TrueSNDecoder2D(
+        args.latent_dim, design_shape, lipschitz_scale=args.decoder_lipschitz_scale, cond_dim=cond_dim_for_decoder
+    )
 
     # Determine perf_dim: if -1 (default), use all latent dimensions
     perf_dim = args.latent_dim if args.perf_dim == -1 else args.perf_dim
     n_perf = 1  # Single performance objective
 
-    # Build MLP predictor (input: perf_dim latent dims + conditions if conditional)
-    predictor_input_dim = perf_dim + (n_conds if args.conditional_predictor else 0)
+    # Build MLP predictor (input: perf_dim latent dims + condition embedding)
+    predictor_input_dim = perf_dim + cond_dim_for_predictor
     predictor = SNMLPPredictor(
         input_dim=predictor_input_dim,
         output_dim=n_perf,
@@ -174,13 +216,14 @@ if __name__ == "__main__":
     print("Constrained Performance-LVAE Training (One-Sided)")
     print(f"Problem: {args.problem_id}")
     print(f"Latent dim: {args.latent_dim}")
-    print(f"Decoder: TrueSNDecoder2D (lipschitz_scale={args.decoder_lipschitz_scale})")
+    print(f"Decoder: TrueSNDecoder2D (lipschitz_scale={args.decoder_lipschitz_scale}, cond_dim={cond_dim_for_decoder})")
+    print(f"Decoder mode: {'Conditional' if args.conditional_decoder else 'Unconditional'}")
     print(f"Perf dim: {perf_dim} (first {perf_dim} dims predict performance)")
     print(f"Predictor mode: {'Conditional' if args.conditional_predictor else 'Unconditional'}")
     print(f"Predictor: SNMLPPredictor (lipschitz_scale={args.predictor_lipschitz_scale})")
-    print(
-        f"Predictor input: {predictor_input_dim} (perf_dim={perf_dim}, n_conds={n_conds if args.conditional_predictor else 0})"
-    )
+    print(f"Predictor input: {predictor_input_dim} (perf_dim={perf_dim}, cond_dim={cond_dim_for_predictor})")
+    if n_img_conds > 0:
+        print(f"Image conditions: {n_img_conds} channel(s), embed_dim={img_cond_embed_dim}")
     print(f"NMSE threshold (rec): {args.nmse_threshold_rec} (R² = {1 - args.nmse_threshold_rec:.2%})")
     print(f"NMSE threshold (perf): {args.nmse_threshold_perf} (R² = {1 - args.nmse_threshold_perf:.2%})")
     print(f"Pruning epoch: {args.pruning_epoch}")
@@ -190,15 +233,17 @@ if __name__ == "__main__":
         print(f"Alpha (lognorm): {args.alpha}")
     print(f"{'=' * 60}\n")
 
+    # Collect all parameters for optimizer (including condition encoder if present)
+    all_params = list(enc.parameters()) + list(dec.parameters()) + list(predictor.parameters())
+    if condition_encoder is not None:
+        all_params += list(condition_encoder.parameters())
+
     # Initialize Constrained Performance-LVAE with dynamic pruning
     plvae = ConstrainedPerfLeastVolumeAE_DP(
         encoder=enc,
         decoder=dec,
         predictor=predictor,
-        optimizer=Adam(
-            list(enc.parameters()) + list(dec.parameters()) + list(predictor.parameters()),
-            lr=args.lr,
-        ),
+        optimizer=Adam(all_params, lr=args.lr),
         latent_dim=args.latent_dim,
         perf_dim=perf_dim,
         nmse_threshold_rec=args.nmse_threshold_rec,
@@ -207,6 +252,8 @@ if __name__ == "__main__":
         pruning_threshold=args.pruning_threshold,
         pruning_strategy=args.pruning_strategy,
         alpha=args.alpha,
+        conditional_decoder=args.conditional_decoder,
+        condition_encoder=condition_encoder,
     ).to(device)
 
     # ---- DataLoader ----
@@ -241,18 +288,38 @@ if __name__ == "__main__":
     c_val = th.stack([val_ds[key][:] for key in scalar_cond_keys], dim=-1)
     p_val = get_performance_target(problem, val_ds)
 
+    # Extract image conditions (if any)
+    # Image conditions may be dense arrays (H, W) or sparse index arrays (variable length).
+    # Sparse index arrays are rasterized into dense binary masks on design_shape.
+    ic_train: th.Tensor | None = None
+    ic_val: th.Tensor | None = None
+    if n_img_conds > 0 and img_cond_shape is not None:
+        if len(img_cond_shape) == 1:
+            # Sparse node index arrays — rasterize to dense masks on node grid (H+1, W+1)
+            node_grid = (design_shape[0] + 1, design_shape[1] + 1)
+            _ic_tr = rasterize_index_conditions(raw_train, img_cond_keys, node_grid)
+            _ic_va = rasterize_index_conditions(raw_val, img_cond_keys, node_grid)
+            print(f"Sparse image conditions rasterized to {node_grid} node grid: {_ic_tr.shape}")
+        else:
+            # Dense image conditions — stack directly
+            _ic_tr = th.stack([train_ds[k][:].float() for k in img_cond_keys], dim=1)
+            _ic_va = th.stack([val_ds[k][:].float() for k in img_cond_keys], dim=1)
+            print(f"Dense image conditions loaded: {_ic_tr.shape}")
+        ic_train = _ic_tr
+        ic_val = _ic_va
+
     # Scale performance values using RobustScaler
     p_scaler = RobustScaler()
     p_train_scaled = th.from_numpy(p_scaler.fit_transform(p_train.numpy())).to(p_train.dtype)
     p_val_scaled = th.from_numpy(p_scaler.transform(p_val.numpy())).to(p_val.dtype)
 
-    # Scale conditions using RobustScaler (if using conditional predictor)
-    if args.conditional_predictor:
+    # Scale conditions using RobustScaler (if using conditional predictor or conditional decoder)
+    if args.conditional_predictor or args.conditional_decoder:
         c_scaler = RobustScaler()
         c_train_scaled = th.from_numpy(c_scaler.fit_transform(c_train.numpy())).to(c_train.dtype)
         c_val_scaled = th.from_numpy(c_scaler.transform(c_val.numpy())).to(c_val.dtype)
     else:
-        # Dummy tensors when not using conditions (won't be used in predictor)
+        # Dummy tensors when not using conditions (won't be used in predictor or decoder)
         c_train_scaled = th.zeros(len(x_train), 0)
         c_val_scaled = th.zeros(len(x_val), 0)
 
@@ -263,14 +330,21 @@ if __name__ == "__main__":
     print(f"Data variance (designs): {plvae.data_var:.6f}")
     print(f"Perf variance (scaled): {plvae.perf_var:.6f}")
 
+    # Build DataLoaders (include image conditions as 4th tensor when present)
+    train_tensors = [x_train, c_train_scaled, p_train_scaled]
+    val_tensors = [x_val, c_val_scaled, p_val_scaled]
+    if ic_train is not None:
+        train_tensors.append(ic_train)
+        val_tensors.append(ic_val)
+
     loader = DataLoader(
-        TensorDataset(x_train, c_train_scaled, p_train_scaled),
+        TensorDataset(*train_tensors),
         batch_size=args.batch_size,
         shuffle=True,
         generator=g,
     )
     val_loader = DataLoader(
-        TensorDataset(x_val, c_val_scaled, p_val_scaled),
+        TensorDataset(*val_tensors),
         batch_size=args.batch_size,
         shuffle=False,
     )
@@ -284,11 +358,13 @@ if __name__ == "__main__":
             x_batch = batch[0].to(device)
             c_batch = batch[1].to(device)
             p_batch = batch[2].to(device)
+            ic_batch = batch[3].to(device) if len(batch) > 3 else None
 
             plvae.optim.zero_grad()
 
             # Compute loss (scalar, constraint-dependent)
-            loss = plvae.loss((x_batch, c_batch, p_batch))
+            batch_tuple = (x_batch, c_batch, p_batch, ic_batch) if ic_batch is not None else (x_batch, c_batch, p_batch)
+            loss = plvae.loss(batch_tuple)
             loss.backward()
             plvae.optim.step()
 
@@ -343,20 +419,38 @@ if __name__ == "__main__":
                         z_mean = z.mean(0)
                         n_active = (z_std > 0).sum().item()
 
-                        # Generate interpolated designs
+                        # Build condition embedding for visualization (if conditional decoder)
+                        viz_cond_emb = None
+                        if args.conditional_decoder or cond_dim_for_predictor > 0:
+                            c_all = c_train_scaled.to(device)
+                            ic_all = ic_train.to(device) if ic_train is not None else None
+                            viz_cond_emb = plvae._build_cond_embedding(c_all, ic_all)
+
+                        # Helper: decode with optional conditions
+                        def _viz_decode(z_viz, cond=None):
+                            if args.conditional_decoder and cond is not None:
+                                return plvae.decoder(z_viz, cond=cond).cpu().numpy()
+                            return plvae.decode(z_viz).cpu().numpy()
+
+                        # Generate interpolated designs (use conditions from corresponding samples)
                         x_ints = []
                         for alpha in [0, 0.25, 0.5, 0.75, 1]:
                             z_ = (1 - alpha) * z[:25] + alpha * th.roll(z, -1, 0)[:25]
-                            x_ints.append(plvae.decode(z_).cpu().numpy())
+                            cond_25 = viz_cond_emb[:25] if viz_cond_emb is not None else None
+                            x_ints.append(_viz_decode(z_, cond_25))
 
-                        # Generate random designs
+                        # Generate random designs (use conditions from first 25 samples as reference)
                         z_rand = z_mean.unsqueeze(0).repeat([25, 1])
                         z_rand[:, idx[:n_active]] += z_std[:n_active] * th.randn_like(z_rand[:, idx[:n_active]])
-                        x_rand = plvae.decode(z_rand).cpu().numpy()
+                        cond_rand = viz_cond_emb[:25] if viz_cond_emb is not None else None
+                        x_rand = _viz_decode(z_rand, cond_rand)
 
                         # Get performance predictions on training data
                         pz_train = z[:, :perf_dim]
-                        p_pred_scaled = plvae.predictor(th.cat([pz_train, c_train_scaled.to(device)], dim=-1))
+                        if viz_cond_emb is not None:
+                            p_pred_scaled = plvae.predictor(th.cat([pz_train, viz_cond_emb], dim=-1))
+                        else:
+                            p_pred_scaled = plvae.predictor(pz_train)
 
                         # Inverse transform to get true-scale values for plotting
                         p_actual = p_scaler.inverse_transform(p_train_scaled.cpu().numpy()).flatten()
@@ -474,7 +568,9 @@ if __name__ == "__main__":
                 x_v = batch_v[0].to(device)
                 c_v = batch_v[1].to(device)
                 p_v = batch_v[2].to(device)
-                _ = plvae.loss((x_v, c_v, p_v))  # Computes and stores metrics
+                ic_v = batch_v[3].to(device) if len(batch_v) > 3 else None
+                val_batch = (x_v, c_v, p_v, ic_v) if ic_v is not None else (x_v, c_v, p_v)
+                _ = plvae.loss(val_batch)  # Computes and stores metrics
                 bsz = x_v.size(0)
                 val_rec += plvae.rec_loss * bsz
                 val_perf += plvae.perf_loss * bsz
@@ -517,6 +613,8 @@ if __name__ == "__main__":
                 "pruning_frozen_z": plvae._z.cpu(),
                 "args": vars(args),
             }
+            if plvae.condition_encoder is not None:
+                ckpt_plvae["condition_encoder"] = plvae.condition_encoder.state_dict()
             th.save(ckpt_plvae, "constrained_vanilla_plvae.pth")
             if args.track:
                 artifact = wandb.Artifact(f"{args.problem_id}_{args.algo}", type="model")

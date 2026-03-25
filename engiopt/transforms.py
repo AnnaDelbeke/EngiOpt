@@ -107,6 +107,47 @@ def get_image_condition_shape(dataset: Dataset, img_keys: list[str]) -> tuple[in
     return tuple(np.asarray(dataset[0][img_keys[0]]).shape)
 
 
+def rasterize_index_conditions(
+    dataset: Dataset,
+    keys: list[str],
+    grid_shape: tuple[int, int],
+) -> th.Tensor:
+    """Convert sparse node-index condition arrays into dense binary masks.
+
+    Many EngiBench problems store boundary conditions as variable-length arrays
+    of flat node indices (e.g. ``fixed_elements = [23, 24, 25, ...]``) on the
+    FE mesh.  For a design grid of shape ``(H, W)``, the node grid is typically
+    ``(H+1, W+1)`` (corner junctions of pixels).  Pass the **node grid shape**
+    as ``grid_shape`` so that indices are unravelled correctly.
+
+    The resulting masks can be fed to a ``ConditionEncoder2D`` which will resize
+    them to a standard resolution (e.g. 100×100) regardless of the input size.
+
+    Args:
+        dataset: A HuggingFace Dataset split.
+        keys: Condition key names containing flat node indices.
+        grid_shape: ``(H, W)`` of the node grid to rasterise onto.  For FE
+            problems this is usually ``(design_H + 1, design_W + 1)``.
+
+    Returns:
+        Dense binary masks of shape ``(N, len(keys), H, W)`` as a float tensor.
+    """
+    n_samples = len(dataset[keys[0]])
+    h, w = grid_shape
+    n_cols = w  # number of columns used to unravel flat indices
+    masks = th.zeros(n_samples, len(keys), h, w)
+    for ch, key in enumerate(keys):
+        for i in range(n_samples):
+            indices = th.as_tensor(np.asarray(dataset[i][key])).long()
+            if indices.numel() == 0:
+                continue
+            rows = indices // n_cols
+            cols = indices % n_cols
+            valid = (rows >= 0) & (rows < h) & (cols >= 0) & (cols < w)
+            masks[i, ch, rows[valid], cols[valid]] = 1.0
+    return masks
+
+
 def get_performance_target(problem: Problem, dataset: Dataset) -> th.Tensor:
     """Build a scalar performance target for each sample.
 

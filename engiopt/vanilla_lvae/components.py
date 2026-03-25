@@ -181,6 +181,8 @@ class TrueSNDecoder2D(nn.Module):
         lipschitz_scale: Scales pre-sigmoid activations. Higher values allow sharper
             decoder Jacobians (more expressive) while keeping output in [0, 1].
             Default: 1.0 (strict 1-Lipschitz before sigmoid).
+        cond_dim: Dimension of condition embedding to concatenate with z before
+            projection. When 0 (default), decoder is unconditional.
     """
 
     def __init__(
@@ -188,15 +190,17 @@ class TrueSNDecoder2D(nn.Module):
         latent_dim: int,
         design_shape: tuple[int, int],
         lipschitz_scale: float = 1.0,
+        cond_dim: int = 0,
     ):
         super().__init__()
         self.design_shape = design_shape
         self.resize_out = transforms.Resize(self.design_shape)
         self.lipschitz_scale = lipschitz_scale
+        self.cond_dim = cond_dim
 
-        # Spectral normalized linear projection
+        # Spectral normalized linear projection (input includes condition embedding when cond_dim > 0)
         self.proj = nn.Sequential(
-            spectral_norm(nn.Linear(latent_dim, 512 * 7 * 7)),
+            spectral_norm(nn.Linear(latent_dim + cond_dim, 512 * 7 * 7)),
             nn.ReLU(inplace=True),
         )
 
@@ -247,7 +251,7 @@ class TrueSNDecoder2D(nn.Module):
             ),
         )
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
+    def forward(self, z: torch.Tensor, cond: torch.Tensor | None = None) -> torch.Tensor:
         """Decode latent vector to 2D design with Lipschitz constraint.
 
         The lipschitz_scale is applied before sigmoid, allowing sharper decoder
@@ -255,10 +259,14 @@ class TrueSNDecoder2D(nn.Module):
 
         Args:
             z: Latent codes (B, latent_dim)
+            cond: Condition embedding (B, cond_dim) or None. When provided,
+                concatenated with z before projection.
 
         Returns:
             Reconstructed designs (B, 1, H, W) in range [0, 1]
         """
+        if cond is not None:
+            z = torch.cat([z, cond], dim=-1)
         x = self.proj(z).view(z.size(0), 512, 7, 7)  # (B, 512, 7, 7)
         x = self.deconv(x)  # (B, 1, 100, 100) - pre-sigmoid activations
         x = self.resize_out(x)  # (B, 1, H_orig, W_orig)
@@ -323,7 +331,70 @@ class SNMLPPredictor(nn.Module):
         return self.output(h * self.lipschitz_scale)  # Scale then project
 
 
+class ConditionEncoder2D(nn.Module):
+    """Convolutional encoder for image-sized conditions (e.g., boundary matrices).
+
+    Encodes image conditions into a compact embedding vector that can be shared
+    between decoder and predictor paths. Uses BatchNorm (not spectral norm) because
+    the condition encoder processes fixed input data — the Lipschitz property only
+    matters along the z-direction, which is guaranteed by the SN decoder.
+
+    Architecture mirrors Encoder2D but with n_img_conds input channels:
+    - Input   [100x100]
+    - Conv1   [50x50]   (k=4, s=2, p=1)
+    - Conv2   [25x25]   (k=4, s=2, p=1)
+    - Conv3   [13x13]   (k=3, s=2, p=1)
+    - Conv4   [7x7]     (k=3, s=2, p=1)
+    - Conv5   [1x1]     (k=7, s=1, p=0) -> cond_embed_dim
+
+    Args:
+        n_img_conds: Number of image condition channels (e.g., 1 for a single boundary matrix).
+        cond_embed_dim: Dimension of the output embedding vector.
+        resize_dimensions: Dimensions to resize input conditions to before encoding.
+    """
+
+    def __init__(
+        self,
+        n_img_conds: int,
+        cond_embed_dim: int = 64,
+        resize_dimensions: tuple[int, int] = (100, 100),
+    ) -> None:
+        super().__init__()
+        self.resize_in = transforms.Resize(resize_dimensions)
+
+        self.features = nn.Sequential(
+            nn.Conv2d(n_img_conds, 64, kernel_size=4, stride=2, padding=1, bias=False),  # 100->50
+            nn.BatchNorm2d(64),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1, bias=False),  # 50->25
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1, bias=False),  # 25->13
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1, bias=False),  # 13->7
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+
+        self.to_embedding = nn.Conv2d(512, cond_embed_dim, kernel_size=7, stride=1, padding=0, bias=True)
+
+    def forward(self, img_conds: torch.Tensor) -> torch.Tensor:
+        """Encode image conditions to embedding vector.
+
+        Args:
+            img_conds: Image conditions (B, n_img_conds, H, W).
+
+        Returns:
+            Condition embedding (B, cond_embed_dim).
+        """
+        x = self.resize_in(img_conds)  # (B, n_img_conds, 100, 100)
+        h = self.features(x)  # (B, 512, 7, 7)
+        return self.to_embedding(h).flatten(1)  # (B, cond_embed_dim)
+
+
 __all__ = [
+    "ConditionEncoder2D",
     "Encoder2D",
     "SNLinearCombo",
     "SNMLPPredictor",
