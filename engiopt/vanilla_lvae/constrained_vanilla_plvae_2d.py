@@ -13,7 +13,6 @@ For more information on LVAE, see: https://arxiv.org/abs/2404.17773
 from __future__ import annotations
 
 from dataclasses import dataclass
-from itertools import product
 import os
 import random
 import time
@@ -413,207 +412,172 @@ if __name__ == "__main__":
                 # Sample and visualize at regular intervals
                 if batches_done % args.sample_interval == 0:
                     with th.no_grad():
-                        # Encode training designs
                         xs = x_train.to(device)
                         z = plvae.encode(xs)
                         z_std, idx = th.sort(z.std(0), descending=True)
                         z_mean = z.mean(0)
                         n_active = (z_std > 0).sum().item()
 
-                        # Select train/val indices spread across performance range
-                        p_mean_tr = p_train_scaled.numpy().mean(axis=1)
-                        tr_sorted = np.argsort(p_mean_tr)
-                        n_tr_viz = min(10, len(tr_sorted))
-                        tr_viz_idx = tr_sorted[np.linspace(0, len(tr_sorted) - 1, n_tr_viz, dtype=int)]
+                        # Farthest-point sampling for viz indices spread across objectives
+                        def _fps(vals: np.ndarray, k: int) -> np.ndarray:
+                            sel = [np.argmax(np.linalg.norm(vals - vals.mean(0), axis=1))]
+                            for _ in range(k - 1):
+                                d = np.min([np.linalg.norm(vals - vals[s], axis=1) for s in sel], axis=0)
+                                sel.append(int(np.argmax(d)))
+                            return np.array(sel)
 
-                        p_mean_va = p_val_scaled.numpy().mean(axis=1)
-                        va_sorted = np.argsort(p_mean_va)
-                        n_va_viz = min(8, len(va_sorted))
-                        va_viz_idx = va_sorted[np.linspace(0, len(va_sorted) - 1, n_va_viz, dtype=int)]
+                        n_tr_viz = min(10, len(x_train))
+                        n_va_viz = min(8, len(x_val))
+                        tr_viz_idx = _fps(p_train_scaled.numpy(), n_tr_viz)
+                        va_viz_idx = _fps(p_val_scaled.numpy(), n_va_viz)
 
-                        # Build condition embedding for visualization (if conditional decoder)
+                        # Condition embeddings
                         viz_cond_emb = None
                         if args.conditional_decoder or cond_dim_for_predictor > 0:
                             c_all = c_train_scaled.to(device)
                             ic_all = ic_train.to(device) if ic_train is not None else None
                             viz_cond_emb = plvae._build_cond_embedding(c_all, ic_all)
 
-                        # Helper: decode with optional conditions
-                        def _viz_decode(z_viz, cond=None):
+                        def _viz_decode(z_in, cond=None):
                             if args.conditional_decoder and cond is not None:
-                                return plvae.decoder(z_viz, cond=cond).cpu().numpy()
-                            return plvae.decode(z_viz).cpu().numpy()
+                                return plvae.decoder(z_in, cond=cond).cpu().numpy()
+                            return plvae.decode(z_in).cpu().numpy()
 
-                        # Generate interpolated designs (spread across performance)
-                        z_start = z[tr_viz_idx]
-                        z_end = z[np.roll(tr_viz_idx, -1)]
-                        cond_start = viz_cond_emb[tr_viz_idx] if viz_cond_emb is not None else None
-                        cond_end = viz_cond_emb[np.roll(tr_viz_idx, -1)] if viz_cond_emb is not None else None
+                        # Interpolated designs between performance-spread pairs
+                        z_start, z_end = z[tr_viz_idx], z[np.roll(tr_viz_idx, -1)]
+                        c_start = viz_cond_emb[tr_viz_idx] if viz_cond_emb is not None else None
+                        c_end = viz_cond_emb[np.roll(tr_viz_idx, -1)] if viz_cond_emb is not None else None
                         x_ints = []
                         for alpha in [0, 0.25, 0.5, 0.75, 1]:
                             z_ = (1 - alpha) * z_start + alpha * z_end
-                            if cond_start is not None and cond_end is not None:
-                                cond_ = (1 - alpha) * cond_start + alpha * cond_end
-                            else:
-                                cond_ = None
-                            x_ints.append(_viz_decode(z_, cond_))
+                            c_ = (1 - alpha) * c_start + alpha * c_end if c_start is not None else None
+                            x_ints.append(_viz_decode(z_, c_))
 
-                        # Generate random designs (use conditions from viz samples as reference)
+                        # Random designs from latent Gaussian
                         z_rand = z_mean.unsqueeze(0).repeat([n_tr_viz, 1])
                         z_rand[:, idx[:n_active]] += z_std[:n_active] * th.randn_like(z_rand[:, idx[:n_active]])
-                        cond_rand = viz_cond_emb[tr_viz_idx] if viz_cond_emb is not None else None
-                        x_rand = _viz_decode(z_rand, cond_rand)
+                        x_rand = _viz_decode(z_rand, viz_cond_emb[tr_viz_idx] if viz_cond_emb is not None else None)
 
-                        # Get performance predictions on training data
-                        pz_train = z[:, :perf_dim]
-                        if viz_cond_emb is not None:
-                            p_pred_scaled = plvae.predictor(th.cat([pz_train, viz_cond_emb], dim=-1))
-                        else:
-                            p_pred_scaled = plvae.predictor(pz_train)
+                        # Performance predictions
+                        pz = z[:, :perf_dim]
+                        pred_in = th.cat([pz, viz_cond_emb], dim=-1) if viz_cond_emb is not None else pz
+                        p_pred_scaled = plvae.predictor(pred_in)
 
-                        # Inverse transform to get true-scale values for plotting
                         p_actual = p_scaler.inverse_transform(p_train_scaled.cpu().numpy())
                         p_predicted = p_scaler.inverse_transform(p_pred_scaled.cpu().numpy())
-
-                        # Move tensors to CPU for plotting
                         z_std_cpu = z_std.cpu().numpy()
                         xs_cpu = xs.cpu().numpy()
 
-                    # Plot 1: Latent dimension statistics
-                    plt.figure(figsize=(12, 6))
-                    plt.subplot(211)
-                    plt.bar(np.arange(len(z_std_cpu)), z_std_cpu)
-                    plt.yscale("log")
-                    plt.xlabel("Latent dimension index")
-                    plt.ylabel("Standard deviation")
-                    plt.title(f"Number of principal components = {n_active}")
-                    plt.subplot(212)
-                    plt.bar(np.arange(n_active), z_std_cpu[:n_active])
-                    plt.yscale("log")
-                    plt.xlabel("Latent dimension index")
-                    plt.ylabel("Standard deviation")
+                    # --- Plots ---
+
+                    # 1: Latent dimension std bars
+                    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6))
+                    ax1.bar(np.arange(len(z_std_cpu)), z_std_cpu)
+                    ax1.set_yscale("log")
+                    ax1.set_title(f"Number of principal components = {n_active}")
+                    ax2.bar(np.arange(n_active), z_std_cpu[:n_active])
+                    ax2.set_yscale("log")
+                    ax2.set_xlabel("Latent dimension index")
+                    for a in (ax1, ax2):
+                        a.set_ylabel("Std dev")
+                    fig.tight_layout()
                     plt.savefig(f"images/dim_{batches_done}.png")
                     plt.close()
 
-                    # Plot 2: Interpolated designs (GT_start | alpha=0..1 | GT_end)
-                    xs_tr_viz = xs_cpu[tr_viz_idx]
-                    xs_tr_end = xs_cpu[np.roll(tr_viz_idx, -1)]
-                    fig, axs = plt.subplots(n_tr_viz, 7, figsize=(14, n_tr_viz))
-                    for i_row in range(n_tr_viz):
-                        axs[i_row, 0].imshow(xs_tr_viz[i_row].reshape(design_shape))
-                        axs[i_row, 0].axis("off")
-                        axs[i_row, 0].set_aspect("equal")
+                    # 2: Interpolated designs (GT_start | alphas | GT_end)
+                    fig, axs = plt.subplots(n_tr_viz, 7, figsize=(14, 2 * n_tr_viz))
+                    xs_start, xs_end = xs_cpu[tr_viz_idx], xs_cpu[np.roll(tr_viz_idx, -1)]
+                    for r in range(n_tr_viz):
+                        axs[r, 0].imshow(xs_start[r].reshape(design_shape))
+                        for j in range(5):
+                            axs[r, j + 1].imshow(x_ints[j][r].reshape(design_shape))
+                        axs[r, 6].imshow(xs_end[r].reshape(design_shape))
+                        for c in range(7):
+                            axs[r, c].axis("off")
                     axs[0, 0].set_title("GT start")
-                    for i_row, j in product(range(n_tr_viz), range(5)):
-                        axs[i_row, j + 1].imshow(x_ints[j][i_row].reshape(design_shape))
-                        axs[i_row, j + 1].axis("off")
-                        axs[i_row, j + 1].set_aspect("equal")
-                    for ax, alpha in zip(axs[0, 1:6], [0, 0.25, 0.5, 0.75, 1]):
-                        ax.set_title(rf"$\alpha$ = {alpha}")
-                    for i_row in range(n_tr_viz):
-                        axs[i_row, 6].imshow(xs_tr_end[i_row].reshape(design_shape))
-                        axs[i_row, 6].axis("off")
-                        axs[i_row, 6].set_aspect("equal")
+                    for ax, a in zip(axs[0, 1:6], [0, 0.25, 0.5, 0.75, 1]):
+                        ax.set_title(rf"$\alpha$={a}")
                     axs[0, 6].set_title("GT end")
                     fig.tight_layout()
                     plt.savefig(f"images/interp_{batches_done}.png")
                     plt.close()
 
-                    # Plot 3: Random designs from latent space
-                    n_rand_cols = 5
-                    n_rand_rows = max(1, (n_tr_viz + n_rand_cols - 1) // n_rand_cols)
-                    fig, axs = plt.subplots(n_rand_rows, n_rand_cols, figsize=(3 * n_rand_cols, 3 * n_rand_rows), squeeze=False)
-                    for k in range(n_tr_viz):
-                        axs[k // n_rand_cols, k % n_rand_cols].imshow(x_rand[k].reshape(design_shape))
-                        axs[k // n_rand_cols, k % n_rand_cols].axis("off")
-                        axs[k // n_rand_cols, k % n_rand_cols].set_aspect("equal")
-                    for k in range(n_tr_viz, n_rand_rows * n_rand_cols):
-                        axs[k // n_rand_cols, k % n_rand_cols].set_visible(False)
+                    # 3: Random designs from latent Gaussian
+                    nc = 5
+                    nr = max(1, (n_tr_viz + nc - 1) // nc)
+                    fig, axs = plt.subplots(nr, nc, figsize=(3 * nc, 3 * nr), squeeze=False)
+                    for k in range(nr * nc):
+                        ax = axs[k // nc, k % nc]
+                        if k < n_tr_viz:
+                            ax.imshow(x_rand[k].reshape(design_shape))
+                        ax.axis("off")
+                    fig.suptitle("Gaussian random designs from latent space")
                     fig.tight_layout()
-                    plt.suptitle("Gaussian random designs from latent space")
                     plt.savefig(f"images/norm_{batches_done}.png")
                     plt.close()
 
-                    # Plot 4: Predicted vs actual performance (one subplot per objective)
+                    # 4: Predicted vs actual performance (per objective)
                     fig, axs = plt.subplots(1, n_perf, figsize=(7 * n_perf, 7), squeeze=False)
                     for oi in range(n_perf):
                         ax = axs[0, oi]
-                        pa = p_actual[:, oi]
-                        pp = p_predicted[:, oi]
+                        pa, pp = p_actual[:, oi], p_predicted[:, oi]
                         ax.scatter(pa, pp, alpha=0.5, s=20)
-                        lo = min(pa.min(), pp.min())
-                        hi = max(pa.max(), pp.max())
-                        ax.plot([lo, hi], [lo, hi], "r--", linewidth=2, label="1:1 line")
-                        mse_oi = np.mean((pa - pp) ** 2)
-                        ax.set_xlabel("Actual")
-                        ax.set_ylabel("Predicted")
-                        ax.set_title(f"{obj_keys[oi]}  MSE: {mse_oi:.4e}")
-                        ax.set_aspect("equal")
-                        ax.grid(visible=True, alpha=0.3)
+                        lim = [min(pa.min(), pp.min()), max(pa.max(), pp.max())]
+                        ax.plot(lim, lim, "r--", lw=2, label="1:1")
+                        ax.set(xlabel="Actual", ylabel="Predicted", aspect="equal")
+                        ax.set_title(f"{obj_keys[oi]}  MSE: {np.mean((pa - pp) ** 2):.4e}")
+                        ax.grid(alpha=0.3)
                         ax.legend()
                     fig.tight_layout()
                     plt.savefig(f"images/perf_pred_vs_actual_{batches_done}.png")
                     plt.close()
 
-                    # Plot 5: Top-2 latent dims colored by performance (train + val)
+                    # 5: Top-2 latent dims colored by performance (per objective)
                     if n_active >= 2:
                         with th.no_grad():
-                            z_val_viz = plvae.encode(x_val[:].to(device)).cpu().numpy()
+                            z_val_np = plvae.encode(x_val[:].to(device)).cpu().numpy()
                         p_val_actual = p_scaler.inverse_transform(p_val_scaled.numpy())
-                        z_train_np = z.cpu().numpy()
-                        active_idx = idx[:n_active].cpu().numpy()
-                        d0, d1 = active_idx[0], active_idx[1]
+                        z_tr_np = z.cpu().numpy()
+                        d0, d1 = idx[:2].cpu().numpy()
 
                         fig, axs = plt.subplots(1, n_perf, figsize=(7 * n_perf, 6), squeeze=False)
                         for oi in range(n_perf):
                             ax = axs[0, oi]
-                            sc = ax.scatter(
-                                z_train_np[:, d0], z_train_np[:, d1],
-                                c=p_actual[:, oi], s=12, alpha=0.5, cmap="viridis",
-                            )
-                            ax.scatter(
-                                z_val_viz[:, d0], z_val_viz[:, d1],
-                                c=p_val_actual[:, oi], s=40, alpha=0.8, marker="x",
-                                cmap="viridis", vmin=sc.get_clim()[0], vmax=sc.get_clim()[1],
-                            )
-                            # Annotate only on first subplot to avoid clutter
+                            sc = ax.scatter(z_tr_np[:, d0], z_tr_np[:, d1], c=p_actual[:, oi],
+                                            s=12, alpha=0.5, cmap="viridis")
+                            ax.scatter(z_val_np[:, d0], z_val_np[:, d1], c=p_val_actual[:, oi],
+                                       s=40, alpha=0.8, marker="x", cmap="viridis",
+                                       vmin=sc.get_clim()[0], vmax=sc.get_clim()[1])
                             if oi == 0:
                                 for j in range(n_tr_viz):
-                                    ti = tr_viz_idx[j]
-                                    ax.annotate(str(j), (z_train_np[ti, d0], z_train_np[ti, d1]),
+                                    ax.annotate(str(j), (z_tr_np[tr_viz_idx[j], d0], z_tr_np[tr_viz_idx[j], d1]),
                                                 fontsize=7, alpha=0.7, color="k")
                                 for j in range(n_va_viz):
-                                    vi = va_viz_idx[j]
-                                    ax.annotate(f"V{j}", (z_val_viz[vi, d0], z_val_viz[vi, d1]),
+                                    ax.annotate(f"V{j}", (z_val_np[va_viz_idx[j], d0], z_val_np[va_viz_idx[j], d1]),
                                                 fontsize=7, fontweight="bold", color="red")
-                            ax.set_xlabel(f"z[{d0}]")
-                            ax.set_ylabel(f"z[{d1}]")
-                            ax.set_title(f"{obj_keys[oi]}")
+                            ax.set(xlabel=f"z[{d0}]", ylabel=f"z[{d1}]")
+                            ax.set_title(obj_keys[oi])
                             fig.colorbar(sc, ax=ax)
                         fig.suptitle(f"Top-2 active dims ({n_active} active) — circles=train, x=val")
                         fig.tight_layout()
                         plt.savefig(f"images/latent_perf_{batches_done}.png")
                         plt.close()
                     else:
-                        # Fallback: blank plot when <2 active dims
                         fig, ax = plt.subplots(figsize=(4, 2))
                         ax.text(0.5, 0.5, f"{n_active} active dim(s)", ha="center", va="center")
                         ax.set_axis_off()
                         plt.savefig(f"images/latent_perf_{batches_done}.png")
                         plt.close()
 
-                    # Plot 6: Validation reconstruction grid (spread across performance)
+                    # 6: Validation reconstruction (spread across performance)
                     with th.no_grad():
                         x_viz = x_val[va_viz_idx].to(device)
                         z_viz = plvae.encode(x_viz)
-
-                        # Build condition embedding for val samples if needed
                         viz_val_cond = None
                         if args.conditional_decoder or cond_dim_for_predictor > 0:
                             c_viz = c_val_scaled[va_viz_idx].to(device)
                             ic_viz = ic_val[va_viz_idx].to(device) if ic_val is not None else None
                             viz_val_cond = plvae._build_cond_embedding(c_viz, ic_viz)
-
                         if args.conditional_decoder and viz_val_cond is not None:
                             x_rec_viz = plvae.decoder(z_viz, cond=viz_val_cond).cpu().numpy()
                         else:
@@ -631,7 +595,7 @@ if __name__ == "__main__":
                     plt.savefig(f"images/val_recon_{batches_done}.png")
                     plt.close()
 
-                    # Log plots to wandb
+                    # Log all plots to wandb
                     wandb.log(
                         {
                             "dim_plot": wandb.Image(f"images/dim_{batches_done}.png"),
