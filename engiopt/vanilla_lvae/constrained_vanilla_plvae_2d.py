@@ -546,33 +546,33 @@ if __name__ == "__main__":
                         z_train_np = z.cpu().numpy()
                         active_idx = idx[:n_active].cpu().numpy()
                         d0, d1 = active_idx[0], active_idx[1]
-                        # Color by mean objective for multi-objective problems
-                        p_color_tr = p_actual.mean(axis=1) if n_perf > 1 else p_actual[:, 0]
-                        p_color_va = p_val_actual.mean(axis=1) if n_perf > 1 else p_val_actual[:, 0]
 
-                        fig, ax = plt.subplots(figsize=(8, 6))
-                        sc = ax.scatter(
-                            z_train_np[:, d0], z_train_np[:, d1],
-                            c=p_color_tr, s=12, alpha=0.5, cmap="viridis",
-                        )
-                        ax.scatter(
-                            z_val_viz[:, d0], z_val_viz[:, d1],
-                            c=p_color_va, s=40, alpha=0.8, marker="x",
-                            cmap="viridis", vmin=sc.get_clim()[0], vmax=sc.get_clim()[1],
-                        )
-                        # Annotate training points matching interp_plot rows (0–24)
-                        for i in range(min(25, len(z_train_np))):
-                            ax.annotate(str(i), (z_train_np[i, d0], z_train_np[i, d1]),
-                                        fontsize=7, alpha=0.7, color="k")
-                        # Annotate val points matching val_reconstruction rows
-                        n_viz_annot = min(8, len(z_val_viz))
-                        for i in range(n_viz_annot):
-                            ax.annotate(f"V{i}", (z_val_viz[i, d0], z_val_viz[i, d1]),
-                                        fontsize=7, fontweight="bold", color="red")
-                        ax.set_xlabel(f"z[{d0}]")
-                        ax.set_ylabel(f"z[{d1}]")
-                        ax.set_title(f"Top-2 active dims ({n_active} active) — circles=train, x=val")
-                        fig.colorbar(sc, ax=ax, label="performance")
+                        fig, axs = plt.subplots(1, n_perf, figsize=(7 * n_perf, 6), squeeze=False)
+                        for oi in range(n_perf):
+                            ax = axs[0, oi]
+                            sc = ax.scatter(
+                                z_train_np[:, d0], z_train_np[:, d1],
+                                c=p_actual[:, oi], s=12, alpha=0.5, cmap="viridis",
+                            )
+                            ax.scatter(
+                                z_val_viz[:, d0], z_val_viz[:, d1],
+                                c=p_val_actual[:, oi], s=40, alpha=0.8, marker="x",
+                                cmap="viridis", vmin=sc.get_clim()[0], vmax=sc.get_clim()[1],
+                            )
+                            # Annotate only on first subplot to avoid clutter
+                            if oi == 0:
+                                for j in range(min(25, len(z_train_np))):
+                                    ax.annotate(str(j), (z_train_np[j, d0], z_train_np[j, d1]),
+                                                fontsize=7, alpha=0.7, color="k")
+                                n_viz_annot = min(8, len(z_val_viz))
+                                for j in range(n_viz_annot):
+                                    ax.annotate(f"V{j}", (z_val_viz[j, d0], z_val_viz[j, d1]),
+                                                fontsize=7, fontweight="bold", color="red")
+                            ax.set_xlabel(f"z[{d0}]")
+                            ax.set_ylabel(f"z[{d1}]")
+                            ax.set_title(f"{obj_keys[oi]}")
+                            fig.colorbar(sc, ax=ax)
+                        fig.suptitle(f"Top-2 active dims ({n_active} active) — circles=train, x=val")
                         fig.tight_layout()
                         plt.savefig(f"images/latent_perf_{batches_done}.png")
                         plt.close()
