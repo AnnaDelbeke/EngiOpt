@@ -552,6 +552,15 @@ if __name__ == "__main__":
                             c=p_val_actual, s=40, alpha=0.8, marker="x",
                             cmap="viridis", vmin=sc.get_clim()[0], vmax=sc.get_clim()[1],
                         )
+                        # Annotate training points matching interp_plot rows (0–24)
+                        for i in range(min(25, len(z_train_np))):
+                            ax.annotate(str(i), (z_train_np[i, d0], z_train_np[i, d1]),
+                                        fontsize=7, alpha=0.7, color="k")
+                        # Annotate val points matching val_reconstruction rows
+                        n_viz_annot = min(8, len(z_val_viz))
+                        for i in range(n_viz_annot):
+                            ax.annotate(f"V{i}", (z_val_viz[i, d0], z_val_viz[i, d1]),
+                                        fontsize=7, fontweight="bold", color="red")
                         ax.set_xlabel(f"z[{d0}]")
                         ax.set_ylabel(f"z[{d1}]")
                         ax.set_title(f"Top-2 active dims ({n_active} active) — circles=train, x=val")
