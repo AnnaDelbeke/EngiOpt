@@ -420,6 +420,17 @@ if __name__ == "__main__":
                         z_mean = z.mean(0)
                         n_active = (z_std > 0).sum().item()
 
+                        # Select train/val indices spread across performance range
+                        p_mean_tr = p_train_scaled.numpy().mean(axis=1)
+                        tr_sorted = np.argsort(p_mean_tr)
+                        n_tr_viz = min(10, len(tr_sorted))
+                        tr_viz_idx = tr_sorted[np.linspace(0, len(tr_sorted) - 1, n_tr_viz, dtype=int)]
+
+                        p_mean_va = p_val_scaled.numpy().mean(axis=1)
+                        va_sorted = np.argsort(p_mean_va)
+                        n_va_viz = min(8, len(va_sorted))
+                        va_viz_idx = va_sorted[np.linspace(0, len(va_sorted) - 1, n_va_viz, dtype=int)]
+
                         # Build condition embedding for visualization (if conditional decoder)
                         viz_cond_emb = None
                         if args.conditional_decoder or cond_dim_for_predictor > 0:
@@ -433,10 +444,11 @@ if __name__ == "__main__":
                                 return plvae.decoder(z_viz, cond=cond).cpu().numpy()
                             return plvae.decode(z_viz).cpu().numpy()
 
-                        # Generate interpolated designs (interpolate both z and conditions)
-                        z_start, z_end = z[:25], th.roll(z, -1, 0)[:25]
-                        cond_start = viz_cond_emb[:25] if viz_cond_emb is not None else None
-                        cond_end = th.roll(viz_cond_emb, -1, 0)[:25] if viz_cond_emb is not None else None
+                        # Generate interpolated designs (spread across performance)
+                        z_start = z[tr_viz_idx]
+                        z_end = z[np.roll(tr_viz_idx, -1)]
+                        cond_start = viz_cond_emb[tr_viz_idx] if viz_cond_emb is not None else None
+                        cond_end = viz_cond_emb[np.roll(tr_viz_idx, -1)] if viz_cond_emb is not None else None
                         x_ints = []
                         for alpha in [0, 0.25, 0.5, 0.75, 1]:
                             z_ = (1 - alpha) * z_start + alpha * z_end
@@ -446,10 +458,10 @@ if __name__ == "__main__":
                                 cond_ = None
                             x_ints.append(_viz_decode(z_, cond_))
 
-                        # Generate random designs (use conditions from first 25 samples as reference)
-                        z_rand = z_mean.unsqueeze(0).repeat([25, 1])
+                        # Generate random designs (use conditions from viz samples as reference)
+                        z_rand = z_mean.unsqueeze(0).repeat([n_tr_viz, 1])
                         z_rand[:, idx[:n_active]] += z_std[:n_active] * th.randn_like(z_rand[:, idx[:n_active]])
-                        cond_rand = viz_cond_emb[:25] if viz_cond_emb is not None else None
+                        cond_rand = viz_cond_emb[tr_viz_idx] if viz_cond_emb is not None else None
                         x_rand = _viz_decode(z_rand, cond_rand)
 
                         # Get performance predictions on training data
@@ -484,21 +496,22 @@ if __name__ == "__main__":
                     plt.close()
 
                     # Plot 2: Interpolated designs (GT_start | alpha=0..1 | GT_end)
-                    xs_end_cpu = np.roll(xs_cpu, -1, axis=0)[:25]
-                    fig, axs = plt.subplots(25, 7, figsize=(14, 25))
-                    for i_row in range(25):
-                        axs[i_row, 0].imshow(xs_cpu[i_row].reshape(design_shape))
+                    xs_tr_viz = xs_cpu[tr_viz_idx]
+                    xs_tr_end = xs_cpu[np.roll(tr_viz_idx, -1)]
+                    fig, axs = plt.subplots(n_tr_viz, 7, figsize=(14, n_tr_viz))
+                    for i_row in range(n_tr_viz):
+                        axs[i_row, 0].imshow(xs_tr_viz[i_row].reshape(design_shape))
                         axs[i_row, 0].axis("off")
                         axs[i_row, 0].set_aspect("equal")
                     axs[0, 0].set_title("GT start")
-                    for i_row, j in product(range(25), range(5)):
+                    for i_row, j in product(range(n_tr_viz), range(5)):
                         axs[i_row, j + 1].imshow(x_ints[j][i_row].reshape(design_shape))
                         axs[i_row, j + 1].axis("off")
                         axs[i_row, j + 1].set_aspect("equal")
                     for ax, alpha in zip(axs[0, 1:6], [0, 0.25, 0.5, 0.75, 1]):
                         ax.set_title(rf"$\alpha$ = {alpha}")
-                    for i_row in range(25):
-                        axs[i_row, 6].imshow(xs_end_cpu[i_row].reshape(design_shape))
+                    for i_row in range(n_tr_viz):
+                        axs[i_row, 6].imshow(xs_tr_end[i_row].reshape(design_shape))
                         axs[i_row, 6].axis("off")
                         axs[i_row, 6].set_aspect("equal")
                     axs[0, 6].set_title("GT end")
@@ -507,11 +520,15 @@ if __name__ == "__main__":
                     plt.close()
 
                     # Plot 3: Random designs from latent space
-                    fig, axs = plt.subplots(5, 5, figsize=(15, 7.5))
-                    for k, (i_row, j) in enumerate(product(range(5), range(5))):
-                        axs[i_row, j].imshow(x_rand[k].reshape(design_shape))
-                        axs[i_row, j].axis("off")
-                        axs[i_row, j].set_aspect("equal")
+                    n_rand_cols = 5
+                    n_rand_rows = max(1, (n_tr_viz + n_rand_cols - 1) // n_rand_cols)
+                    fig, axs = plt.subplots(n_rand_rows, n_rand_cols, figsize=(3 * n_rand_cols, 3 * n_rand_rows), squeeze=False)
+                    for k in range(n_tr_viz):
+                        axs[k // n_rand_cols, k % n_rand_cols].imshow(x_rand[k].reshape(design_shape))
+                        axs[k // n_rand_cols, k % n_rand_cols].axis("off")
+                        axs[k // n_rand_cols, k % n_rand_cols].set_aspect("equal")
+                    for k in range(n_tr_viz, n_rand_rows * n_rand_cols):
+                        axs[k // n_rand_cols, k % n_rand_cols].set_visible(False)
                     fig.tight_layout()
                     plt.suptitle("Gaussian random designs from latent space")
                     plt.savefig(f"images/norm_{batches_done}.png")
@@ -561,12 +578,13 @@ if __name__ == "__main__":
                             )
                             # Annotate only on first subplot to avoid clutter
                             if oi == 0:
-                                for j in range(min(25, len(z_train_np))):
-                                    ax.annotate(str(j), (z_train_np[j, d0], z_train_np[j, d1]),
+                                for j in range(n_tr_viz):
+                                    ti = tr_viz_idx[j]
+                                    ax.annotate(str(j), (z_train_np[ti, d0], z_train_np[ti, d1]),
                                                 fontsize=7, alpha=0.7, color="k")
-                                n_viz_annot = min(8, len(z_val_viz))
-                                for j in range(n_viz_annot):
-                                    ax.annotate(f"V{j}", (z_val_viz[j, d0], z_val_viz[j, d1]),
+                                for j in range(n_va_viz):
+                                    vi = va_viz_idx[j]
+                                    ax.annotate(f"V{j}", (z_val_viz[vi, d0], z_val_viz[vi, d1]),
                                                 fontsize=7, fontweight="bold", color="red")
                             ax.set_xlabel(f"z[{d0}]")
                             ax.set_ylabel(f"z[{d1}]")
@@ -584,17 +602,16 @@ if __name__ == "__main__":
                         plt.savefig(f"images/latent_perf_{batches_done}.png")
                         plt.close()
 
-                    # Plot 6: Validation reconstruction grid
-                    n_viz = min(8, len(x_val))
+                    # Plot 6: Validation reconstruction grid (spread across performance)
                     with th.no_grad():
-                        x_viz = x_val[:n_viz].to(device)
+                        x_viz = x_val[va_viz_idx].to(device)
                         z_viz = plvae.encode(x_viz)
 
                         # Build condition embedding for val samples if needed
                         viz_val_cond = None
                         if args.conditional_decoder or cond_dim_for_predictor > 0:
-                            c_viz = c_val_scaled[:n_viz].to(device)
-                            ic_viz = ic_val[:n_viz].to(device) if ic_val is not None else None
+                            c_viz = c_val_scaled[va_viz_idx].to(device)
+                            ic_viz = ic_val[va_viz_idx].to(device) if ic_val is not None else None
                             viz_val_cond = plvae._build_cond_embedding(c_viz, ic_viz)
 
                         if args.conditional_decoder and viz_val_cond is not None:
@@ -602,9 +619,9 @@ if __name__ == "__main__":
                         else:
                             x_rec_viz = plvae.decode(z_viz).cpu().numpy()
 
-                    fig, axs = plt.subplots(n_viz, 2, figsize=(4, 2 * n_viz))
-                    for row in range(n_viz):
-                        axs[row, 0].imshow(x_val[row].numpy().reshape(design_shape))
+                    fig, axs = plt.subplots(n_va_viz, 2, figsize=(4, 2 * n_va_viz))
+                    for row in range(n_va_viz):
+                        axs[row, 0].imshow(x_val[va_viz_idx[row]].numpy().reshape(design_shape))
                         axs[row, 0].axis("off")
                         axs[row, 1].imshow(x_rec_viz[row].reshape(design_shape))
                         axs[row, 1].axis("off")
