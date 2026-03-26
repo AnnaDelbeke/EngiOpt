@@ -533,31 +533,39 @@ if __name__ == "__main__":
                     plt.savefig(f"images/perf_pred_vs_actual_{batches_done}.png")
                     plt.close()
 
-                    # Plot 5: Constraint satisfaction over time (new plot)
-                    fig, ax = plt.subplots(figsize=(10, 4))
-                    ax.axhline(
-                        y=args.nmse_threshold_rec,
-                        color="blue",
-                        linestyle="--",
-                        label=f"rec threshold ({args.nmse_threshold_rec})",
-                    )
-                    ax.axhline(
-                        y=args.nmse_threshold_perf,
-                        color="orange",
-                        linestyle="--",
-                        label=f"perf threshold ({args.nmse_threshold_perf})",
-                    )
-                    ax.scatter([0], [plvae.nmse_rec], color="blue", s=100, marker="o", label=f"current rec NMSE")
-                    ax.scatter([1], [plvae.nmse_perf], color="orange", s=100, marker="o", label=f"current perf NMSE")
-                    ax.set_xticks([0, 1])
-                    ax.set_xticklabels(["Reconstruction", "Performance"])
-                    ax.set_ylabel("NMSE")
-                    ax.set_title(f"Constraint Status - Volume Active: {plvae.vol_active}")
-                    ax.legend(loc="upper right")
-                    ax.set_ylim(0, max(0.1, plvae.nmse_rec * 1.5, plvae.nmse_perf * 1.5))
-                    plt.tight_layout()
-                    plt.savefig(f"images/constraint_status_{batches_done}.png")
-                    plt.close()
+                    # Plot 5: Top-2 latent dims colored by performance (train + val)
+                    if n_active >= 2:
+                        with th.no_grad():
+                            z_val_viz = plvae.encode(x_val[:].to(device)).cpu().numpy()
+                        p_val_actual = p_scaler.inverse_transform(p_val_scaled.numpy()).flatten()
+                        z_train_np = z.cpu().numpy()
+                        active_idx = idx[:n_active].cpu().numpy()
+                        d0, d1 = active_idx[0], active_idx[1]
+
+                        fig, ax = plt.subplots(figsize=(8, 6))
+                        sc = ax.scatter(
+                            z_train_np[:, d0], z_train_np[:, d1],
+                            c=p_actual, s=12, alpha=0.5, cmap="viridis",
+                        )
+                        ax.scatter(
+                            z_val_viz[:, d0], z_val_viz[:, d1],
+                            c=p_val_actual, s=40, alpha=0.8, marker="x",
+                            cmap="viridis", vmin=sc.get_clim()[0], vmax=sc.get_clim()[1],
+                        )
+                        ax.set_xlabel(f"z[{d0}]")
+                        ax.set_ylabel(f"z[{d1}]")
+                        ax.set_title(f"Top-2 active dims ({n_active} active) — circles=train, x=val")
+                        fig.colorbar(sc, ax=ax, label="performance")
+                        fig.tight_layout()
+                        plt.savefig(f"images/latent_perf_{batches_done}.png")
+                        plt.close()
+                    else:
+                        # Fallback: blank plot when <2 active dims
+                        fig, ax = plt.subplots(figsize=(4, 2))
+                        ax.text(0.5, 0.5, f"{n_active} active dim(s)", ha="center", va="center")
+                        ax.set_axis_off()
+                        plt.savefig(f"images/latent_perf_{batches_done}.png")
+                        plt.close()
 
                     # Plot 6: Validation reconstruction grid
                     n_viz = min(8, len(x_val))
@@ -596,7 +604,7 @@ if __name__ == "__main__":
                             "interp_plot": wandb.Image(f"images/interp_{batches_done}.png"),
                             "norm_plot": wandb.Image(f"images/norm_{batches_done}.png"),
                             "perf_pred_vs_actual": wandb.Image(f"images/perf_pred_vs_actual_{batches_done}.png"),
-                            "constraint_status": wandb.Image(f"images/constraint_status_{batches_done}.png"),
+                            "latent_perf": wandb.Image(f"images/latent_perf_{batches_done}.png"),
                             "val_reconstruction": wandb.Image(f"images/val_recon_{batches_done}.png"),
                         }
                     )
