@@ -201,7 +201,8 @@ if __name__ == "__main__":
 
     # Determine perf_dim: if -1 (default), use all latent dimensions
     perf_dim = args.latent_dim if args.perf_dim == -1 else args.perf_dim
-    n_perf = 1  # Single performance objective
+    obj_keys = [name for name, _ in problem.objectives]
+    n_perf = len(obj_keys)
 
     # Build MLP predictor (input: perf_dim latent dims + condition embedding)
     predictor_input_dim = perf_dim + cond_dim_for_predictor
@@ -459,8 +460,8 @@ if __name__ == "__main__":
                             p_pred_scaled = plvae.predictor(pz_train)
 
                         # Inverse transform to get true-scale values for plotting
-                        p_actual = p_scaler.inverse_transform(p_train_scaled.cpu().numpy()).flatten()
-                        p_predicted = p_scaler.inverse_transform(p_pred_scaled.cpu().numpy()).flatten()
+                        p_actual = p_scaler.inverse_transform(p_train_scaled.cpu().numpy())
+                        p_predicted = p_scaler.inverse_transform(p_pred_scaled.cpu().numpy())
 
                         # Move tensors to CPU for plotting
                         z_std_cpu = z_std.cpu().numpy()
@@ -516,20 +517,24 @@ if __name__ == "__main__":
                     plt.savefig(f"images/norm_{batches_done}.png")
                     plt.close()
 
-                    # Plot 4: Predicted vs actual performance
-                    plt.figure(figsize=(8, 8))
-                    plt.scatter(p_actual, p_predicted, alpha=0.5, s=20)
-                    min_val = min(p_actual.min(), p_predicted.min())
-                    max_val = max(p_actual.max(), p_predicted.max())
-                    plt.plot([min_val, max_val], [min_val, max_val], "r--", linewidth=2, label="1:1 line")
-                    plt.xlabel("Actual Performance")
-                    plt.ylabel("Predicted Performance")
-                    mse_value = np.mean((p_actual - p_predicted) ** 2)
-                    plt.title(f"MSE: {mse_value:.4e}")
-                    plt.grid(visible=True, alpha=0.3)
-                    plt.legend()
-                    plt.axis("equal")
-                    plt.tight_layout()
+                    # Plot 4: Predicted vs actual performance (one subplot per objective)
+                    fig, axs = plt.subplots(1, n_perf, figsize=(7 * n_perf, 7), squeeze=False)
+                    for oi in range(n_perf):
+                        ax = axs[0, oi]
+                        pa = p_actual[:, oi]
+                        pp = p_predicted[:, oi]
+                        ax.scatter(pa, pp, alpha=0.5, s=20)
+                        lo = min(pa.min(), pp.min())
+                        hi = max(pa.max(), pp.max())
+                        ax.plot([lo, hi], [lo, hi], "r--", linewidth=2, label="1:1 line")
+                        mse_oi = np.mean((pa - pp) ** 2)
+                        ax.set_xlabel("Actual")
+                        ax.set_ylabel("Predicted")
+                        ax.set_title(f"{obj_keys[oi]}  MSE: {mse_oi:.4e}")
+                        ax.set_aspect("equal")
+                        ax.grid(visible=True, alpha=0.3)
+                        ax.legend()
+                    fig.tight_layout()
                     plt.savefig(f"images/perf_pred_vs_actual_{batches_done}.png")
                     plt.close()
 
@@ -537,19 +542,22 @@ if __name__ == "__main__":
                     if n_active >= 2:
                         with th.no_grad():
                             z_val_viz = plvae.encode(x_val[:].to(device)).cpu().numpy()
-                        p_val_actual = p_scaler.inverse_transform(p_val_scaled.numpy()).flatten()
+                        p_val_actual = p_scaler.inverse_transform(p_val_scaled.numpy())
                         z_train_np = z.cpu().numpy()
                         active_idx = idx[:n_active].cpu().numpy()
                         d0, d1 = active_idx[0], active_idx[1]
+                        # Color by mean objective for multi-objective problems
+                        p_color_tr = p_actual.mean(axis=1) if n_perf > 1 else p_actual[:, 0]
+                        p_color_va = p_val_actual.mean(axis=1) if n_perf > 1 else p_val_actual[:, 0]
 
                         fig, ax = plt.subplots(figsize=(8, 6))
                         sc = ax.scatter(
                             z_train_np[:, d0], z_train_np[:, d1],
-                            c=p_actual, s=12, alpha=0.5, cmap="viridis",
+                            c=p_color_tr, s=12, alpha=0.5, cmap="viridis",
                         )
                         ax.scatter(
                             z_val_viz[:, d0], z_val_viz[:, d1],
-                            c=p_val_actual, s=40, alpha=0.8, marker="x",
+                            c=p_color_va, s=40, alpha=0.8, marker="x",
                             cmap="viridis", vmin=sc.get_clim()[0], vmax=sc.get_clim()[1],
                         )
                         # Annotate training points matching interp_plot rows (0–24)

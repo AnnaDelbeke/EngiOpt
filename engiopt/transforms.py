@@ -149,32 +149,26 @@ def rasterize_index_conditions(
 
 
 def get_performance_target(problem: Problem, dataset: Dataset) -> th.Tensor:
-    """Build a scalar performance target for each sample.
+    """Build a performance target for each sample.
 
-    For single-objective problems this returns ``dataset[objectives_keys[0]]``
-    directly.  For multi-objective problems with a ``weight`` condition
-    (e.g. thermoelastic2d) it returns the weighted sum used by the optimizer:
-    ``weight * obj[0] + (1 - weight) * obj[1]``.
+    For single-objective problems this returns ``dataset[obj_key]`` as ``(N, 1)``.
+    For multi-objective problems this returns the vector of all objectives as
+    ``(N, n_objs)``, so the predictor learns to reconstruct each objective
+    independently.
 
     Returns:
-        Tensor of shape ``(N, 1)``.
+        Tensor of shape ``(N, 1)`` for single-objective or ``(N, n_objs)`` for
+        multi-objective problems.
     """
-    n_objs = len(problem.objectives_keys)
+    obj_keys = [name for name, _ in problem.objectives]
+    n_objs = len(obj_keys)
     if n_objs == 1:
-        return th.as_tensor(dataset[problem.objectives_keys[0]][:]).float().unsqueeze(-1)
+        return th.as_tensor(dataset[obj_keys[0]][:]).float().unsqueeze(-1)
 
-    # Multi-objective: compute weighted sum
-    obj_tensors = [th.as_tensor(dataset[k][:]).float() for k in problem.objectives_keys]
-
-    if "weight" in dataset.column_names:
-        w = th.as_tensor(dataset["weight"][:]).float()
-        perf = w * obj_tensors[0] + (1.0 - w) * obj_tensors[1]
-    else:
-        # Equal weighting fallback
-        perf = th.stack(obj_tensors, dim=-1).mean(dim=-1)
-
-    print(f"Multi-objective performance target: weighted sum of {problem.objectives_keys[:2]}")
-    return perf.unsqueeze(-1)
+    # Multi-objective: return full vector
+    obj_tensors = [th.as_tensor(dataset[k][:]).float() for k in obj_keys]
+    print(f"Multi-objective performance target: {obj_keys}")
+    return th.stack(obj_tensors, dim=-1)
 
 
 def normalize(ds: Dataset, condition_names: list[str]) -> tuple[Dataset, th.Tensor, th.Tensor]:
