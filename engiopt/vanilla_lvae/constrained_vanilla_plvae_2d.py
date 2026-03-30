@@ -19,6 +19,7 @@ import random
 import time
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.preprocessing import QuantileTransformer
@@ -553,11 +554,15 @@ if __name__ == "__main__":
                         fig, axs = plt.subplots(1, n_perf, figsize=(7 * n_perf, 6), squeeze=False)
                         for oi in range(n_perf):
                             ax = axs[0, oi]
+                            # Quantile-based colormap normalization for heavy-tailed objectives
+                            all_perf = np.concatenate([p_actual[:, oi], p_val_actual[:, oi]])
+                            boundaries = np.percentile(all_perf, np.linspace(0, 100, 256))
+                            boundaries = np.unique(boundaries)  # remove duplicates from ties
+                            norm = mcolors.BoundaryNorm(boundaries, ncolors=256)
                             sc = ax.scatter(z_tr_np[:, d0], z_tr_np[:, d1], c=p_actual[:, oi],
-                                            s=12, alpha=0.5, cmap="viridis")
+                                            s=12, alpha=0.5, cmap="viridis", norm=norm)
                             ax.scatter(z_val_np[:, d0], z_val_np[:, d1], c=p_val_actual[:, oi],
-                                       s=40, alpha=0.8, marker="x", cmap="viridis",
-                                       vmin=sc.get_clim()[0], vmax=sc.get_clim()[1])
+                                       s=40, alpha=0.8, marker="x", cmap="viridis", norm=norm)
                             if oi == 0:
                                 for j in range(n_tr_viz):
                                     ax.annotate(str(j), (z_tr_np[tr_viz_idx[j], d0], z_tr_np[tr_viz_idx[j], d1]),
