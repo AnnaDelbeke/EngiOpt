@@ -440,8 +440,8 @@ if __name__ == "__main__":
 
                         def _viz_decode(z_in, cond=None):
                             if args.conditional_decoder and cond is not None:
-                                return plvae.decoder(z_in, cond=cond).cpu().numpy()
-                            return plvae.decode(z_in).cpu().numpy()
+                                return plvae.decoder(z_in, cond=cond).clamp(0, 1).cpu().numpy()
+                            return plvae.decode(z_in).clamp(0, 1).cpu().numpy()
 
                         # Interpolated designs between performance-spread pairs
                         z_start, z_end = z[tr_viz_idx], z[np.roll(tr_viz_idx, -1)]
@@ -579,9 +579,9 @@ if __name__ == "__main__":
                             ic_viz = ic_val[va_viz_idx].to(device) if ic_val is not None else None
                             viz_val_cond = plvae._build_cond_embedding(c_viz, ic_viz)
                         if args.conditional_decoder and viz_val_cond is not None:
-                            x_rec_viz = plvae.decoder(z_viz, cond=viz_val_cond).cpu().numpy()
+                            x_rec_viz = plvae.decoder(z_viz, cond=viz_val_cond).clamp(0, 1).cpu().numpy()
                         else:
-                            x_rec_viz = plvae.decode(z_viz).cpu().numpy()
+                            x_rec_viz = plvae.decode(z_viz).clamp(0, 1).cpu().numpy()
 
                     fig, axs = plt.subplots(n_va_viz, 2, figsize=(4, 2 * n_va_viz))
                     for row in range(n_va_viz):

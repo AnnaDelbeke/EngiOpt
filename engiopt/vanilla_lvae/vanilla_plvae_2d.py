@@ -368,12 +368,12 @@ if __name__ == "__main__":
                         x_ints = []
                         for alpha in [0, 0.25, 0.5, 0.75, 1]:
                             z_ = (1 - alpha) * z[:25] + alpha * th.roll(z, -1, 0)[:25]
-                            x_ints.append(plvae.decode(z_).cpu().numpy())
+                            x_ints.append(plvae.decode(z_).clamp(0, 1).cpu().numpy())
 
                         # Generate random designs
                         z_rand = z_mean.unsqueeze(0).repeat([25, 1])
                         z_rand[:, idx[:n_active]] += z_std[:n_active] * th.randn_like(z_rand[:, idx[:n_active]])
-                        x_rand = plvae.decode(z_rand).cpu().numpy()
+                        x_rand = plvae.decode(z_rand).clamp(0, 1).cpu().numpy()
 
                         # Get performance predictions on training data
                         pz_train = z[:, :perf_dim]

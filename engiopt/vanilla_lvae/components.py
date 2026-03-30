@@ -156,14 +156,18 @@ class TrueSNDecoder2D(nn.Module):
     """2D decoder with spectral normalization for Lipschitz-constrained decoding.
 
     Same architecture as a standard decoder but with spectral normalization applied
-    to all linear and convolutional layers. The lipschitz_scale parameter controls
-    the sharpness of the decoder's output by scaling activations before the final
-    sigmoid, allowing more expressive decoders while keeping output in [0, 1].
+    to all linear and convolutional layers. The lipschitz_scale parameter sets the
+    effective Lipschitz bound of the decoder: each SN layer is 1-Lipschitz, and the
+    final output is scaled by lipschitz_scale, giving an overall bound of exactly
+    lipschitz_scale.
+
+    Output is unbounded (no sigmoid) so that the Lipschitz bound is honest everywhere
+    — no saturation artifacts. Clamp to [0, 1] at inference for valid designs.
 
     This is critical for:
     - Preventing isotropic shrinkage during volume minimization
     - Stable gradient flow in constrained optimization
-    - Bounded perturbations in design space
+    - Honest Lipschitz bound that matches lipschitz_scale exactly
 
     Architecture: Latent vector -> Deconv layers -> Output
     • Latent   [latent_dim]
@@ -173,14 +177,13 @@ class TrueSNDecoder2D(nn.Module):
     • Deconv2  [128x25x25]  (k=3, s=2, p=1)
     • Deconv3  [64x50x50]   (k=4, s=2, p=1)
     • Deconv4  [1x100x100]  (k=4, s=2, p=1)
-    • Scale by lipschitz_scale, then Sigmoid -> [0, 1]
+    • Scale by lipschitz_scale (raw output, no activation)
 
     Args:
         latent_dim: Dimension of the latent space
         design_shape: Original design shape (H, W) for resizing output
-        lipschitz_scale: Scales pre-sigmoid activations. Higher values allow sharper
-            decoder Jacobians (more expressive) while keeping output in [0, 1].
-            Default: 1.0 (strict 1-Lipschitz before sigmoid).
+        lipschitz_scale: Effective Lipschitz bound of the decoder. The overall
+            Lipschitz constant equals exactly this value. Default: 1.0.
         cond_dim: Dimension of condition embedding to concatenate with z before
             projection. When 0 (default), decoder is unconditional.
     """
@@ -254,8 +257,8 @@ class TrueSNDecoder2D(nn.Module):
     def forward(self, z: torch.Tensor, cond: torch.Tensor | None = None) -> torch.Tensor:
         """Decode latent vector to 2D design with Lipschitz constraint.
 
-        The lipschitz_scale is applied before sigmoid, allowing sharper decoder
-        Jacobians while keeping output in [0, 1].
+        Output is raw (unbounded) so the Lipschitz bound equals lipschitz_scale
+        exactly. Clamp to [0, 1] at inference for valid designs.
 
         Args:
             z: Latent codes (B, latent_dim)
@@ -263,23 +266,23 @@ class TrueSNDecoder2D(nn.Module):
                 concatenated with z before projection.
 
         Returns:
-            Reconstructed designs (B, 1, H, W) in range [0, 1]
+            Reconstructed designs (B, 1, H, W), unbounded (clamp at inference)
         """
         if cond is not None:
             z = torch.cat([z, cond], dim=-1)
         x = self.proj(z).view(z.size(0), 512, 7, 7)  # (B, 512, 7, 7)
-        x = self.deconv(x)  # (B, 1, 100, 100) - pre-sigmoid activations
+        x = self.deconv(x)  # (B, 1, 100, 100)
         x = self.resize_out(x)  # (B, 1, H_orig, W_orig)
-        return torch.sigmoid(x * self.lipschitz_scale)  # Scale then squash to [0, 1]
+        return x * self.lipschitz_scale
 
 
 class SNMLPPredictor(nn.Module):
     """Spectral normalized MLP for performance prediction from latent codes.
 
     Enforces c-Lipschitz continuity to ensure small steps in latent space correspond
-    to bounded steps in performance space. The lipschitz_scale parameter scales
-    activations before the final linear layer, allowing sharper internal gradients
-    while maintaining bounded Lipschitz continuity.
+    to bounded steps in performance space. Each SN layer is 1-Lipschitz, and the
+    lipschitz_scale multiplies hidden outputs before the final SN layer, giving an
+    overall Lipschitz bound of exactly lipschitz_scale.
 
     This is critical for:
     - Ensuring latent space respects performance information
@@ -290,8 +293,8 @@ class SNMLPPredictor(nn.Module):
         input_dim: Input dimension (latent_dim + n_conditions for conditional)
         output_dim: Output dimension (number of performance metrics)
         hidden_dims: Tuple of hidden layer widths (default: (256, 128))
-        lipschitz_scale: Scales hidden layer activations before final layer. Higher
-            values allow sharper gradients (more expressive). Default: 1.0.
+        lipschitz_scale: Effective Lipschitz bound of the predictor. The overall
+            Lipschitz constant equals exactly this value. Default: 1.0.
     """
 
     def __init__(
