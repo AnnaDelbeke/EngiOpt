@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import partial
 from itertools import product
+from typing import Literal
 import os
 import random
 import time
@@ -20,6 +21,7 @@ import time
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import matplotlib.pyplot as plt
 import numpy as np
+from sklearn.preprocessing import QuantileTransformer
 from sklearn.preprocessing import RobustScaler
 import torch as th
 from torch.optim import Adam
@@ -107,6 +109,10 @@ class Args:
     """Lipschitz bound for spectrally normalized decoder. Controls output scaling."""
     predictor_lipschitz_scale: float = 1.0
     """Lipschitz bound for spectrally normalized MLP predictor. Controls output scaling."""
+    perf_scaler: Literal["robust", "quantile"] = "robust"
+    """Scaler for performance values. 'robust' preserves cardinal structure (RobustScaler);
+    'quantile' maps to N(0,1) via rank transform (QuantileTransformer), making Lipschitz
+    bounds ordinal and preventing heavy-tailed objectives from dominating the latent space."""
 
     # Dataset filtering
     condition_filter_key: str | None = None
@@ -277,10 +283,14 @@ if __name__ == "__main__":
     c_val = th.stack([val_ds[key][:] for key in scalar_cond_keys], dim=-1)
     p_val = get_performance_target(problem, val_ds)
 
-    # Scale performance values using RobustScaler
-    p_scaler = RobustScaler()
+    # Scale performance values
+    if args.perf_scaler == "quantile":
+        p_scaler = QuantileTransformer(output_distribution="normal", n_quantiles=min(len(p_train), 1000))
+    else:
+        p_scaler = RobustScaler()
     p_train_scaled = th.from_numpy(p_scaler.fit_transform(p_train.numpy())).to(p_train.dtype)
     p_val_scaled = th.from_numpy(p_scaler.transform(p_val.numpy())).to(p_val.dtype)
+    print(f"Performance scaler: {args.perf_scaler} | scaled range: [{p_train_scaled.min():.3f}, {p_train_scaled.max():.3f}]")
 
     # Scale conditions using RobustScaler (if using conditional predictor)
     if args.conditional_predictor:
