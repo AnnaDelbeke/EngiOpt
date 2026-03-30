@@ -347,9 +347,10 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         if self._zstd is None or self._zmean is None:
             return
 
-        # Only consider active dimensions
+        # Only consider active dimensions; plummet needs ≥2 to detect a drop
         z_std_active = self._zstd[~self._p]
-        if len(z_std_active) == 0:
+        min_active = 3 if self.pruning_strategy == "plummet" else 1
+        if len(z_std_active) < min_active:
             return
 
         # Select pruning strategy
