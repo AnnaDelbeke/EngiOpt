@@ -13,7 +13,9 @@ import torch
 import torch.nn as nn
 from torchvision import transforms
 
-from engiopt.lvae_core import SNLinearCombo, TrueSNDeconv2DCombo, spectral_norm_conv
+from engiopt.lvae_core import SNLinearCombo
+from engiopt.lvae_core import spectral_norm_conv
+from engiopt.lvae_core import TrueSNDeconv2DCombo
 
 __all__ = [
     "Encoder2D",

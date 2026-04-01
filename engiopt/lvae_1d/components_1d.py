@@ -19,12 +19,10 @@ import torch as th
 from torch import nn
 from torch.nn.utils.parametrizations import spectral_norm
 
-from engiopt.lvae_core.components import (
-    MLP,
-    SNMLP,
-    Normalizer,
-    Scale,
-)
+from engiopt.lvae_core.components import MLP
+from engiopt.lvae_core.components import Normalizer
+from engiopt.lvae_core.components import Scale
+from engiopt.lvae_core.components import SNMLP
 
 # Re-export for backward compatibility with existing imports
 __all__ = [

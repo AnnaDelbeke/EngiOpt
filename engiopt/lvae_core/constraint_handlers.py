@@ -18,7 +18,8 @@ Available methods:
     - SoftplusALHandler: Smoothed augmented Lagrangian using softplus
 """
 
-from abc import ABC, abstractmethod
+from abc import ABC
+from abc import abstractmethod
 from dataclasses import dataclass
 
 import torch

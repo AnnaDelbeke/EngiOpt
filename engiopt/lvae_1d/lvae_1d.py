@@ -28,9 +28,10 @@ from torch.utils.data import DataLoader
 from torch.utils.data import TensorDataset
 import tqdm
 import tyro
-import wandb
 
-from engiopt.lvae_core import LeastVolumeAE_DynamicPruning, polynomial_schedule
+from engiopt.lvae_core import LeastVolumeAE_DynamicPruning
+from engiopt.lvae_core import polynomial_schedule
+import wandb
 
 
 @dataclass

@@ -42,17 +42,15 @@ from torch.utils.data import TensorDataset
 from torchvision import transforms
 import tqdm
 import tyro
-import wandb
 
-from engiopt.lvae_core import (
-    ConstraintHandler,
-    ConstraintLosses,
-    ConstraintThresholds,
-    LeastVolumeAE_DynamicPruning,
-    TrueSNDeconv2DCombo,
-    create_constraint_handler,
-    spectral_norm_conv,
-)
+from engiopt.lvae_core import ConstraintHandler
+from engiopt.lvae_core import ConstraintLosses
+from engiopt.lvae_core import ConstraintThresholds
+from engiopt.lvae_core import create_constraint_handler
+from engiopt.lvae_core import LeastVolumeAE_DynamicPruning
+from engiopt.lvae_core import spectral_norm_conv
+from engiopt.lvae_core import TrueSNDeconv2DCombo
+import wandb
 
 
 @dataclass

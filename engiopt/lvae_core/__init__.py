@@ -16,32 +16,26 @@ Example:
     ... )
 """
 
-from .aes import (
-    AutoEncoder,
-    ConstrainedDesignLeastVolumeAE_DP,
-    DesignLeastVolumeAE_DP,
-    InterpretableDesignLeastVolumeAE_DP,
-    LeastVolumeAE,
-    LeastVolumeAE_DynamicPruning,
-    PruningPolicy,
-    VAE,
-)
-from .components import (
-    MLP,
-    SNMLP,
-    SNLinearCombo,
-    Normalizer,
-    Scale,
-    TrueSNDeconv2DCombo,
-    polynomial_schedule,
-    spectral_norm_conv,
-)
-from .constraint_handlers import (
-    ConstraintHandler,
-    ConstraintLosses,
-    ConstraintThresholds,
-    create_constraint_handler,
-)
+from .aes import AutoEncoder
+from .aes import ConstrainedDesignLeastVolumeAE_DP
+from .aes import DesignLeastVolumeAE_DP
+from .aes import InterpretableDesignLeastVolumeAE_DP
+from .aes import LeastVolumeAE
+from .aes import LeastVolumeAE_DynamicPruning
+from .aes import PruningPolicy
+from .aes import VAE
+from .components import MLP
+from .components import Normalizer
+from .components import polynomial_schedule
+from .components import Scale
+from .components import SNLinearCombo
+from .components import SNMLP
+from .components import spectral_norm_conv
+from .components import TrueSNDeconv2DCombo
+from .constraint_handlers import ConstraintHandler
+from .constraint_handlers import ConstraintLosses
+from .constraint_handlers import ConstraintThresholds
+from .constraint_handlers import create_constraint_handler
 
 __all__ = [
     # Autoencoder models

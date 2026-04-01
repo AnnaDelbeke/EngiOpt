@@ -50,16 +50,16 @@ from torch.utils.data import DataLoader
 from torch.utils.data import TensorDataset
 import tqdm
 import tyro
-import wandb
 
-from engiopt.lvae_1d.components_1d import Conv1DEncoder, FactorizedBezierDecoder, Normalizer
-from engiopt.lvae_core import (
-    ConstraintHandler,
-    ConstraintLosses,
-    ConstraintThresholds,
-    LeastVolumeAE_DynamicPruning,
-    create_constraint_handler,
-)
+from engiopt.lvae_1d.components_1d import Conv1DEncoder
+from engiopt.lvae_1d.components_1d import FactorizedBezierDecoder
+from engiopt.lvae_1d.components_1d import Normalizer
+from engiopt.lvae_core import ConstraintHandler
+from engiopt.lvae_core import ConstraintLosses
+from engiopt.lvae_core import ConstraintThresholds
+from engiopt.lvae_core import create_constraint_handler
+from engiopt.lvae_core import LeastVolumeAE_DynamicPruning
+import wandb
 
 
 @dataclass
