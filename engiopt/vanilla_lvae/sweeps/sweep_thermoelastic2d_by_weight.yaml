@@ -1,6 +1,6 @@
 # WandB Sweep: Constrained P-LVAE on thermoelastic2d — single-weight study
 # Trains separate models for each weight value + one all-weights model.
-# Grid: 6 weight configs × 3 seeds = 18 runs
+# Grid: 5 weights × 3 rec × 2 perf × 3 seeds = 90 runs
 method: grid
 command:
   - "python"
@@ -17,7 +17,7 @@ parameters:
     value: "thermoelastic2d"
 
   seed:
-    value: 1
+    values: [1, 2, 3]
 
   # NMSE thresholds (start generous, tighten after initial results)
   nmse_threshold_rec:

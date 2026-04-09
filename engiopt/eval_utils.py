@@ -56,6 +56,18 @@ class BaseEvaluationArgs:
     compute_lv_suite: bool = False
     """Compute full LV metric suite (projection residual, dual gap). Requires decoder."""
 
+    # LVAE condition filter (for weight-isolated models)
+    lvae_condition_filter_key: str | None = None
+    """Condition column the LVAE was trained on (e.g. 'weight'). Also filters test conditions."""
+    lvae_condition_filter_value: float | None = None
+    """Single condition value. Set automatically when looping over lvae_condition_filter_values."""
+    lvae_condition_filter_values: str = ""
+    """Comma-separated condition filter values (e.g. '0.0,0.3,0.5,0.7,1.0').
+    When set, evaluation loops over each value, re-sampling test conditions per regime.
+    Takes precedence over lvae_condition_filter_value."""
+    lvae_condition_filter_range: tuple[float, float] | None = None
+    """Inclusive (lo, hi) range the LVAE was trained on."""
+
     # WandB logging
     log_to_wandb: bool = False
     """Log evaluation metrics to the original WandB training run."""
@@ -85,10 +97,37 @@ def parse_thresholds(args: BaseEvaluationArgs) -> tuple[list[float], list[float]
     return rec, perf
 
 
+def parse_condition_filter_values(args: BaseEvaluationArgs) -> list[float | None]:
+    """Parse condition filter values for iteration.
+
+    Precedence: ``lvae_condition_filter_values`` (comma-separated) >
+    ``lvae_condition_filter_value`` (single) > ``[None]`` (no filter).
+
+    Eval scripts should loop over the returned list, setting
+    ``args.lvae_condition_filter_value`` per iteration before calling
+    :func:`setup_evaluation` and :func:`run_lvae_loop`::
+
+        for fv in parse_condition_filter_values(args):
+            args.lvae_condition_filter_value = fv
+            problem, device, ... = setup_evaluation(args)
+            gen_designs = generate(...)
+            run_lvae_loop(...)
+    """
+    if args.lvae_condition_filter_values:
+        return [float(x) for x in args.lvae_condition_filter_values.split(",") if x.strip()]
+    if args.lvae_condition_filter_value is not None:
+        return [args.lvae_condition_filter_value]
+    return [None]
+
+
 def setup_evaluation(
     args: BaseEvaluationArgs,
 ) -> tuple[Any, th.device, np.random.Generator, th.Tensor, Any, np.ndarray, np.ndarray]:
     """Shared setup: problem, device, RNG, condition sampling.
+
+    When ``args.lvae_condition_filter_key`` is set, the test split is filtered
+    to matching rows **before** sampling so that generated designs and
+    reference designs come from the same weight regime as the LVAE.
 
     Returns:
         (problem, device, rng, conditions_tensor, sampled_conditions, sampled_designs_np, selected_indices)
@@ -107,6 +146,21 @@ def setup_evaluation(
         device = th.device("cuda")
     else:
         device = th.device("cpu")
+
+    # Pre-filter the test split when a condition filter is specified so that
+    # sampled conditions and reference designs belong to the target regime.
+    if args.lvae_condition_filter_key is not None:
+        from engiopt.vanilla_lvae.utils import filter_dataset_by_condition
+
+        original_test = problem.dataset["test"]
+        filtered_test = filter_dataset_by_condition(
+            original_test,
+            args.lvae_condition_filter_key,
+            value=args.lvae_condition_filter_value,
+            value_range=args.lvae_condition_filter_range,
+        )
+        # Temporarily swap the test split so sample_conditions draws from the filtered set
+        problem.dataset["test"] = filtered_test
 
     conditions_tensor, sampled_conditions, sampled_designs_np, selected_indices = sample_conditions(
         problem=problem, n_samples=args.n_samples, device=device, seed=seed
@@ -157,6 +211,9 @@ def compute_lvae_metrics(  # noqa: PLR0913, PLR0915
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
         device=device,
+        condition_filter_key=args.lvae_condition_filter_key,
+        condition_filter_value=args.lvae_condition_filter_value,
+        condition_filter_range=args.lvae_condition_filter_range,
     )
 
     # Encode designs to latent space and slice to active (unpruned) dims
@@ -218,6 +275,9 @@ def compute_lvae_metrics(  # noqa: PLR0913, PLR0915
                 wandb_entity=args.wandb_entity,
                 device=device,
                 design_shape=problem.design_space.shape,
+                condition_filter_key=args.lvae_condition_filter_key,
+                condition_filter_value=args.lvae_condition_filter_value,
+                condition_filter_range=args.lvae_condition_filter_range,
             )
             print(f"  [diag] Decoder loaded on {next(decoder.parameters()).device}", flush=True)
             recon_stats = lv_reconstruction_residual_stats(encoder, decoder, gen_designs_np, device)
@@ -240,6 +300,9 @@ def compute_lvae_metrics(  # noqa: PLR0913, PLR0915
                     wandb_entity=args.wandb_entity,
                     device=device,
                     design_shape=problem.design_space.shape,
+                    condition_filter_key=args.lvae_condition_filter_key,
+                    condition_filter_value=args.lvae_condition_filter_value,
+                    condition_filter_range=args.lvae_condition_filter_range,
                 )
                 dual = lv_dual_projection_gap(encoder, decoder, enc_ro, dec_ro, gen_designs_np, device)
                 metrics_dict[f"lv_dual_gap_mean{suffix}"] = dual["dual_gap_mean"]
@@ -294,6 +357,8 @@ def run_lvae_loop(  # noqa: PLR0913
 ) -> None:
     """Drive the full LVAE threshold loop, including WandB logging."""
     metrics_dict["lvae_seed"] = args.lvae_seed
+    metrics_dict["lvae_condition_filter_key"] = args.lvae_condition_filter_key
+    metrics_dict["lvae_condition_filter_value"] = args.lvae_condition_filter_value
 
     # Log base metrics to WandB immediately before LVAE loop (timeout-safe)
     if args.log_to_wandb and run is not None:

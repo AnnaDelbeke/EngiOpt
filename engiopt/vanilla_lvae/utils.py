@@ -83,6 +83,9 @@ class LVAEConfig:
     conditional_predictor: bool
     nmse_threshold_rec: float
     nmse_threshold_perf: float
+    condition_filter_key: str | None = None
+    condition_filter_value: float | None = None
+    condition_filter_range: tuple[float, float] | None = None
 
 
 class PrunedEncoder(nn.Module):
@@ -121,6 +124,25 @@ def get_active_mask(encoder: nn.Module) -> npt.NDArray[np.bool_]:
     return np.ones(1, dtype=bool)  # no pruning info — caller should not filter
 
 
+def _build_alias(  # noqa: PLR0913
+    seed: int,
+    rec_threshold: float,
+    perf_threshold: float,
+    condition_filter_key: str | None = None,
+    condition_filter_value: float | None = None,
+    condition_filter_range: tuple[float, float] | None = None,
+) -> str:
+    """Build a WandB artifact alias matching the training script convention."""
+    alias = f"seed_{seed}_rec{rec_threshold}_perf{perf_threshold}"
+    if condition_filter_key is not None:
+        if condition_filter_range is not None:
+            lo, hi = condition_filter_range
+            alias += f"_{condition_filter_key}_{lo}-{hi}"
+        elif condition_filter_value is not None:
+            alias += f"_{condition_filter_key}_{condition_filter_value}"
+    return alias
+
+
 def load_lvae_encoder(
     problem_id: str,
     seed: int,
@@ -129,6 +151,9 @@ def load_lvae_encoder(
     wandb_project: str = "lv_mmd",
     wandb_entity: str | None = None,
     device: th.device | str = "cpu",
+    condition_filter_key: str | None = None,
+    condition_filter_value: float | None = None,
+    condition_filter_range: tuple[float, float] | None = None,
 ) -> tuple[nn.Module, LVAEConfig]:
     """Load a trained LVAE encoder from WandB.
 
@@ -140,6 +165,9 @@ def load_lvae_encoder(
         wandb_project: WandB project name.
         wandb_entity: WandB entity name (None for default).
         device: Device to load model onto.
+        condition_filter_key: Condition column used to filter training data.
+        condition_filter_value: Exact condition value used during training.
+        condition_filter_range: Inclusive (lo, hi) range used during training.
 
     Returns:
         Tuple of (encoder module, LVAEConfig dataclass).
@@ -151,7 +179,9 @@ def load_lvae_encoder(
 
     # Build artifact path
     artifact_name = f"{problem_id}_constrained_vanilla_plvae_2d"
-    alias = f"seed_{seed}_rec{rec_threshold}_perf{perf_threshold}"
+    alias = _build_alias(
+        seed, rec_threshold, perf_threshold, condition_filter_key, condition_filter_value, condition_filter_range
+    )
 
     if wandb_entity is not None:
         artifact_path = f"{wandb_entity}/{wandb_project}/{artifact_name}:{alias}"
@@ -226,6 +256,9 @@ def load_lvae_encoder_decoder(
     wandb_entity: str | None = None,
     device: th.device | str = "cpu",
     design_shape: tuple[int, ...] | None = None,
+    condition_filter_key: str | None = None,
+    condition_filter_value: float | None = None,
+    condition_filter_range: tuple[float, float] | None = None,
 ) -> tuple[nn.Module, nn.Module, LVAEConfig]:
     """Load LVAE encoder and decoder from WandB (no predictor, no problem instantiation).
 
@@ -240,13 +273,18 @@ def load_lvae_encoder_decoder(
         design_shape: Override for the design spatial dimensions (H, W).
             If provided, used instead of the value in the training config.
             Pass ``problem.design_space.shape`` to guarantee correctness.
+        condition_filter_key: Condition column used to filter training data.
+        condition_filter_value: Exact condition value used during training.
+        condition_filter_range: Inclusive (lo, hi) range used during training.
 
     Returns:
         Tuple of (encoder, decoder, LVAEConfig).
     """
     # Build artifact path
     artifact_name = f"{problem_id}_constrained_vanilla_plvae_2d"
-    alias = f"seed_{seed}_rec{rec_threshold}_perf{perf_threshold}"
+    alias = _build_alias(
+        seed, rec_threshold, perf_threshold, condition_filter_key, condition_filter_value, condition_filter_range
+    )
 
     if wandb_entity is not None:
         artifact_path = f"{wandb_entity}/{wandb_project}/{artifact_name}:{alias}"
@@ -325,6 +363,9 @@ def load_full_lvae(
     wandb_entity: str | None = None,
     device: th.device | str = "cpu",
     design_shape: tuple[int, ...] | None = None,
+    condition_filter_key: str | None = None,
+    condition_filter_value: float | None = None,
+    condition_filter_range: tuple[float, float] | None = None,
 ) -> tuple[nn.Module, nn.Module, nn.Module, LVAEConfig]:
     """Load full LVAE (encoder, decoder, predictor) from WandB.
 
@@ -339,13 +380,18 @@ def load_full_lvae(
         design_shape: Override for the design spatial dimensions (H, W).
             If provided, used instead of the value in the training config.
             Pass ``problem.design_space.shape`` to guarantee correctness.
+        condition_filter_key: Condition column used to filter training data.
+        condition_filter_value: Exact condition value used during training.
+        condition_filter_range: Inclusive (lo, hi) range used during training.
 
     Returns:
         Tuple of (encoder, decoder, predictor, LVAEConfig).
     """
     # Build artifact path
     artifact_name = f"{problem_id}_constrained_vanilla_plvae_2d"
-    alias = f"seed_{seed}_rec{rec_threshold}_perf{perf_threshold}"
+    alias = _build_alias(
+        seed, rec_threshold, perf_threshold, condition_filter_key, condition_filter_value, condition_filter_range
+    )
 
     if wandb_entity is not None:
         artifact_path = f"{wandb_entity}/{wandb_project}/{artifact_name}:{alias}"
