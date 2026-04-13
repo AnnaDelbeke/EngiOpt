@@ -25,6 +25,7 @@ import tyro
 from engiopt.transforms import get_image_condition_keys
 from engiopt.transforms import get_image_condition_shape
 from engiopt.transforms import get_scalar_condition_keys
+from engiopt.vanilla_lvae.utils import filter_dataset_by_condition
 import wandb
 
 
@@ -68,6 +69,16 @@ class Args:
     """dimensionality of the latent space"""
     sample_interval: int = 1000
     """interval between image samples"""
+
+    # Dataset filtering
+    condition_filter_key: str | None = None
+    """Condition key to filter dataset on (e.g., 'weight'). None = use all data."""
+    condition_filter_value: float | None = None
+    """Exact value to match (within tolerance). Mutually exclusive with condition_filter_range."""
+    condition_filter_range: tuple[float, float] | None = None
+    """Inclusive [lo, hi] range to filter on. Overrides condition_filter_value."""
+    condition_filter_tolerance: float = 0.01
+    """Tolerance for exact-value matching."""
 
 
 class Generator(nn.Module):
@@ -326,7 +337,18 @@ if __name__ == "__main__":
     adversarial_loss.to(device)
 
     # Configure data loader
-    training_ds = problem.dataset.with_format("torch", device=device)["train"]
+    raw_train = problem.dataset["train"]
+    if args.condition_filter_key is not None:
+        raw_train = filter_dataset_by_condition(
+            raw_train,
+            args.condition_filter_key,
+            value=args.condition_filter_value,
+            value_range=args.condition_filter_range,
+            tolerance=args.condition_filter_tolerance,
+        )
+        print(f"Filtered training set to {len(raw_train)} samples on {args.condition_filter_key}")
+
+    training_ds = raw_train.with_format("torch", device=device)
 
     # Build dataset tensors: designs, scalar conds, and (optionally) image conds
     ds_tensors: list[th.Tensor] = [
@@ -518,7 +540,14 @@ if __name__ == "__main__":
                         artifact_disc = wandb.Artifact(f"{args.problem_id}_{args.algo}_discriminator", type="model")
                         artifact_disc.add_file("discriminator.pth")
 
-                        wandb.log_artifact(artifact_gen, aliases=[f"seed_{args.seed}", f"run_{wandb.run.id}"])
-                        wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}", f"run_{wandb.run.id}"])
+                        alias = f"seed_{args.seed}"
+                        if args.condition_filter_key is not None:
+                            if args.condition_filter_range is not None:
+                                lo, hi = args.condition_filter_range
+                                alias += f"_{args.condition_filter_key}_{lo}-{hi}"
+                            elif args.condition_filter_value is not None:
+                                alias += f"_{args.condition_filter_key}_{args.condition_filter_value}"
+                        wandb.log_artifact(artifact_gen, aliases=[alias, f"run_{wandb.run.id}"])
+                        wandb.log_artifact(artifact_disc, aliases=[alias, f"run_{wandb.run.id}"])
 
     wandb.finish()
