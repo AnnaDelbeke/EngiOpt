@@ -424,7 +424,8 @@ if __name__ == "__main__":
                 if batches_done % args.sample_interval == 0:
                     with th.no_grad():
                         xs = x_train.to(device)
-                        z = plvae.encode(xs)
+                        _chunk = 512
+                        z = th.cat([plvae.encode(xs[_i0 : _i0 + _chunk]) for _i0 in range(0, len(xs), _chunk)], dim=0)
                         z_std, idx = th.sort(z.std(0), descending=True)
                         z_mean = z.mean(0)
                         n_active = (z_std > 0).sum().item()
@@ -442,12 +443,21 @@ if __name__ == "__main__":
                         tr_viz_idx = _fps(p_train_scaled.numpy(), n_tr_viz)
                         va_viz_idx = _fps(p_val_scaled.numpy(), n_va_viz)
 
-                        # Condition embeddings
+                        # Condition embeddings (batched to avoid OOM on large datasets)
                         viz_cond_emb = None
                         if args.conditional_decoder or cond_dim_for_predictor > 0:
                             c_all = c_train_scaled.to(device)
                             ic_all = ic_train.to(device) if ic_train is not None else None
-                            viz_cond_emb = plvae._build_cond_embedding(c_all, ic_all)
+                            viz_cond_emb = th.cat(
+                                [
+                                    plvae._build_cond_embedding(
+                                        c_all[_i0 : _i0 + _chunk],
+                                        ic_all[_i0 : _i0 + _chunk] if ic_all is not None else None,
+                                    )
+                                    for _i0 in range(0, len(c_all), _chunk)
+                                ],
+                                dim=0,
+                            )
 
                         def _viz_decode(z_in, cond=None):
                             if args.conditional_decoder and cond is not None:
