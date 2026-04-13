@@ -1,0 +1,37 @@
+# WandB Sweep: Diffusion imgcond on thermoelastic2d — single-weight study
+# Trains separate models for each weight value.
+# Grid: 5 weights × 3 seeds = 15 runs
+method: grid
+command:
+  - "python"
+  - "engiopt/diffusion_2d_cond_imgcond/diffusion_2d_cond_imgcond.py"
+  - "--save_model"
+  - "${args}"
+
+metric:
+  name: loss
+  goal: minimize
+
+parameters:
+  problem_id:
+    value: "thermoelastic2d"
+
+  seed:
+    values: [1, 2, 3]
+
+  n_epochs:
+    value: 200
+  batch_size:
+    value: 32
+  lr:
+    value: 0.0004
+  num_timesteps:
+    value: 250
+
+  wandb_project:
+    value: "engiopt"
+
+  condition_filter_key:
+    value: "weight"
+  condition_filter_value:
+    values: [0.0, 0.3, 0.5, 0.7, 1.0]

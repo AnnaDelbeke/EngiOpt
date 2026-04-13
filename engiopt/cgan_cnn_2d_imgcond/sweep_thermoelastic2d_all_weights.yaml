@@ -1,0 +1,33 @@
+# WandB Sweep: CGAN-CNN imgcond on thermoelastic2d — full dataset (no weight filter)
+# Grid: 3 seeds = 3 runs
+method: grid
+command:
+  - "python"
+  - "engiopt/cgan_cnn_2d_imgcond/cgan_cnn_2d_imgcond.py"
+  - "--save_model"
+  - "${args}"
+
+metric:
+  name: g_loss
+  goal: minimize
+
+parameters:
+  problem_id:
+    value: "thermoelastic2d"
+
+  seed:
+    values: [1, 2, 3]
+
+  n_epochs:
+    value: 200
+  batch_size:
+    value: 32
+  latent_dim:
+    value: 32
+  lr_gen:
+    value: 0.0001
+  lr_disc:
+    value: 0.0004
+
+  wandb_project:
+    value: "engiopt"
