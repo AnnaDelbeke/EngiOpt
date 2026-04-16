@@ -112,6 +112,8 @@ class Args:
     """Lipschitz bound for spectrally normalized decoder. Controls output scaling."""
     predictor_lipschitz_scale: float = 1.0
     """Lipschitz bound for spectrally normalized MLP predictor. Controls output scaling."""
+    predictor_axis_aligned: bool = False
+    """Use diagonal first layer in predictor to prevent off-axis latent correlations."""
     perf_scaler: Literal["robust", "quantile"] = "robust"
     """Scaler for performance values. 'robust' preserves cardinal structure (RobustScaler);
     'quantile' maps to N(0,1) via rank transform (QuantileTransformer), making Lipschitz
@@ -217,6 +219,7 @@ if __name__ == "__main__":
         output_dim=n_perf,
         hidden_dims=args.predictor_hidden_dims,
         lipschitz_scale=args.predictor_lipschitz_scale,
+        axis_aligned=args.predictor_axis_aligned,
     )
 
     print(f"\n{'=' * 60}")
@@ -227,7 +230,7 @@ if __name__ == "__main__":
     print(f"Decoder mode: {'Conditional' if args.conditional_decoder else 'Unconditional'}")
     print(f"Perf dim: {perf_dim} (first {perf_dim} dims predict performance)")
     print(f"Predictor mode: {'Conditional' if args.conditional_predictor else 'Unconditional'}")
-    print(f"Predictor: SNMLPPredictor (lipschitz_scale={args.predictor_lipschitz_scale})")
+    print(f"Predictor: SNMLPPredictor (lipschitz_scale={args.predictor_lipschitz_scale}, axis_aligned={args.predictor_axis_aligned})")
     print(f"Predictor input: {predictor_input_dim} (perf_dim={perf_dim}, cond_dim={cond_dim_for_predictor})")
     if n_img_conds > 0:
         print(f"Image conditions: {n_img_conds} channel(s), embed_dim={img_cond_embed_dim}")

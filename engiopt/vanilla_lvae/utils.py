@@ -80,6 +80,7 @@ class LVAEConfig:
     decoder_lipschitz_scale: float
     predictor_lipschitz_scale: float
     predictor_hidden_dims: tuple[int, ...]
+    predictor_axis_aligned: bool
     conditional_predictor: bool
     nmse_threshold_rec: float
     nmse_threshold_perf: float
@@ -217,6 +218,7 @@ def load_lvae_encoder(
         decoder_lipschitz_scale=config.get("decoder_lipschitz_scale", 1.0),
         predictor_lipschitz_scale=config.get("predictor_lipschitz_scale", 1.0),
         predictor_hidden_dims=tuple(config.get("predictor_hidden_dims", (256, 128))),
+        predictor_axis_aligned=config.get("predictor_axis_aligned", False),
         conditional_predictor=config.get("conditional_predictor", False),
         nmse_threshold_rec=config["nmse_threshold_rec"],
         nmse_threshold_perf=config["nmse_threshold_perf"],
@@ -324,6 +326,7 @@ def load_lvae_encoder_decoder(
         decoder_lipschitz_scale=config.get("decoder_lipschitz_scale", 1.0),
         predictor_lipschitz_scale=config.get("predictor_lipschitz_scale", 1.0),
         predictor_hidden_dims=tuple(config.get("predictor_hidden_dims", (256, 128))),
+        predictor_axis_aligned=config.get("predictor_axis_aligned", False),
         conditional_predictor=config.get("conditional_predictor", False),
         nmse_threshold_rec=config["nmse_threshold_rec"],
         nmse_threshold_perf=config["nmse_threshold_perf"],
@@ -431,6 +434,7 @@ def load_full_lvae(
         decoder_lipschitz_scale=config.get("decoder_lipschitz_scale", 1.0),
         predictor_lipschitz_scale=config.get("predictor_lipschitz_scale", 1.0),
         predictor_hidden_dims=tuple(config.get("predictor_hidden_dims", (256, 128))),
+        predictor_axis_aligned=config.get("predictor_axis_aligned", False),
         conditional_predictor=config.get("conditional_predictor", False),
         nmse_threshold_rec=config["nmse_threshold_rec"],
         nmse_threshold_perf=config["nmse_threshold_perf"],
@@ -462,6 +466,7 @@ def load_full_lvae(
         output_dim=1,
         hidden_dims=tuple(config.get("predictor_hidden_dims", (256, 128))),
         lipschitz_scale=config.get("predictor_lipschitz_scale", 1.0),
+        axis_aligned=config.get("predictor_axis_aligned", False),
     )
     predictor.load_state_dict(ckpt["predictor"])
     predictor.eval().to(device)
