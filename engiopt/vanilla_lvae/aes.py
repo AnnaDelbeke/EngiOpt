@@ -200,6 +200,8 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         pruning_threshold: float = 0.02,
         pruning_strategy: Literal["plummet", "lognorm"] = "plummet",
         alpha: float = 0,
+        *,
+        decorrelate_volume: bool = False,
     ) -> None:
         if weights is None:
             weights = [1.0, 0.001]
@@ -214,6 +216,7 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         self.pruning_threshold = pruning_threshold
         self.pruning_strategy = pruning_strategy
         self.alpha = alpha
+        self.decorrelate_volume = decorrelate_volume
 
         # EMA statistics (initialized on first batch)
         self._zstd: torch.Tensor | None = None
@@ -255,14 +258,7 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         x_hat = self.decode(z)
         self._update_moving_mean(z)
 
-        # Volume loss: pruned dims use frozen std (captured at prune time),
-        # active dims use current std. This makes pruning volume-neutral.
-        s = self._frozen_std.clone()
-        if (~self._p).any():
-            s[~self._p] = z[:, ~self._p].std(0)
-        vol_loss = torch.exp(torch.log(s).mean())
-
-        return torch.stack([self.loss_rec(x, x_hat), vol_loss])
+        return torch.stack([self.loss_rec(x, x_hat), self._compute_vol_loss(z)])
 
     @torch.no_grad()
     def _update_moving_mean(self, z: torch.Tensor) -> None:
@@ -273,6 +269,34 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         else:
             self._zstd = torch.lerp(self._zstd, z.std(0), 1 - self._beta)
             self._zmean = torch.lerp(self._zmean, z.mean(0), 1 - self._beta)
+
+    def _compute_vol_loss(self, z: torch.Tensor) -> torch.Tensor:
+        """Compute volume loss with optional off-diagonal correlation penalty.
+
+        When decorrelate_volume is False (default), computes the standard geometric
+        mean of per-dimension standard deviations with frozen stds for pruned dims.
+
+        When decorrelate_volume is True, adds mean(off_diag(corr)²) of active dims
+        to penalize correlated latent dimensions that waste volume budget.
+
+        Args:
+            z: Latent codes of shape (batch_size, latent_dim).
+
+        Returns:
+            Scalar volume loss.
+        """
+        s = self._frozen_std.clone()
+        active = ~self._p
+        if active.any():
+            s[active] = z[:, active].std(0)
+        vol_loss = torch.exp(torch.log(s).mean())
+
+        if self.decorrelate_volume and active.sum() > 1:
+            corr = torch.corrcoef(z[:, active].T)
+            mask = ~torch.eye(corr.shape[0], dtype=torch.bool, device=corr.device)
+            vol_loss = vol_loss + corr[mask].pow(2).mean()
+
+        return vol_loss
 
     @torch.no_grad()
     def _plummet_prune(self, z_std: torch.Tensor) -> torch.Tensor:
@@ -430,6 +454,8 @@ class PerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         pruning_threshold: float = 0.02,
         pruning_strategy: Literal["plummet", "lognorm"] = "plummet",
         alpha: float = 0,
+        *,
+        decorrelate_volume: bool = False,
     ) -> None:
         if weights is None:
             weights = [1.0, 1.0, 0.001]
@@ -445,6 +471,7 @@ class PerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
             pruning_threshold=pruning_threshold,
             pruning_strategy=pruning_strategy,
             alpha=alpha,
+            decorrelate_volume=decorrelate_volume,
         )
         self.predictor = predictor
 
@@ -467,18 +494,11 @@ class PerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         # Performance prediction using full latent + conditions
         p_hat = self.predictor(torch.cat([z, c], dim=-1))
 
-        # Volume loss: pruned dims use frozen std (captured at prune time),
-        # active dims use current std. This makes pruning volume-neutral.
-        s = self._frozen_std.clone()
-        if (~self._p).any():
-            s[~self._p] = z[:, ~self._p].std(0)
-        vol_loss = torch.exp(torch.log(s).mean())
-
         return torch.stack(
             [
                 self.loss_rec(x, x_hat),
                 self.loss_rec(p, p_hat),
-                vol_loss,
+                self._compute_vol_loss(z),
             ]
         )
 
@@ -523,6 +543,8 @@ class ConstrainedLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         pruning_threshold: float = 0.02,
         pruning_strategy: Literal["plummet", "lognorm"] = "plummet",
         alpha: float = 0,
+        *,
+        decorrelate_volume: bool = False,
     ) -> None:
         # Parent uses weights for its loss computation, but we override loss()
         super().__init__(
@@ -537,6 +559,7 @@ class ConstrainedLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
             pruning_threshold=pruning_threshold,
             pruning_strategy=pruning_strategy,
             alpha=alpha,
+            decorrelate_volume=decorrelate_volume,
         )
         self.nmse_threshold = nmse_threshold
 
@@ -604,12 +627,7 @@ class ConstrainedLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         self._update_moving_mean(z)
 
         rec_loss = self.loss_rec(x, x_hat)
-
-        # Compute volume loss
-        s = self._frozen_std.clone()
-        if (~self._p).any():
-            s[~self._p] = z[:, ~self._p].std(0)
-        vol_loss = torch.exp(torch.log(s).mean())
+        vol_loss = self._compute_vol_loss(z)
 
         # Compute NMSE = MSE / Var(data)
         nmse = rec_loss / self._data_var
@@ -672,6 +690,8 @@ class InterpretablePerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: 
         pruning_threshold: float = 0.02,
         pruning_strategy: Literal["plummet", "lognorm"] = "plummet",
         alpha: float = 0,
+        *,
+        decorrelate_volume: bool = False,
     ) -> None:
         if weights is None:
             weights = [1.0, 0.1, 0.001]
@@ -687,6 +707,7 @@ class InterpretablePerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: 
             pruning_threshold=pruning_threshold,
             pruning_strategy=pruning_strategy,
             alpha=alpha,
+            decorrelate_volume=decorrelate_volume,
         )
         self.predictor = predictor
         self.perf_dim = perf_dim
@@ -715,18 +736,11 @@ class InterpretablePerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: 
         else:
             p_hat = self.predictor(pz)
 
-        # Volume loss: pruned dims use frozen std (captured at prune time),
-        # active dims use current std. This makes pruning volume-neutral.
-        s = self._frozen_std.clone()
-        if (~self._p).any():
-            s[~self._p] = z[:, ~self._p].std(0)
-        vol_loss = torch.exp(torch.log(s).mean())
-
         return torch.stack(
             [
                 self.loss_rec(x, x_hat),
                 self.loss_rec(p, p_hat),
-                vol_loss,
+                self._compute_vol_loss(z),
             ]
         )
 
@@ -793,6 +807,7 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         *,
         conditional_decoder: bool = False,
         condition_encoder: nn.Module | None = None,
+        decorrelate_volume: bool = False,
     ) -> None:
         # Parent uses weights for its loss computation, but we override loss()
         super().__init__(
@@ -807,6 +822,7 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
             pruning_threshold=pruning_threshold,
             pruning_strategy=pruning_strategy,
             alpha=alpha,
+            decorrelate_volume=decorrelate_volume,
         )
         self.predictor = predictor
         self.perf_dim = perf_dim
@@ -961,11 +977,7 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         else:
             perf_loss = torch.tensor(0.0, device=x.device)
 
-        # Volume loss (geometric mean of stds, frozen for pruned dims)
-        s = self._frozen_std.clone()
-        if (~self._p).any():
-            s[~self._p] = z[:, ~self._p].std(0)
-        vol_loss = torch.exp(torch.log(s).mean())
+        vol_loss = self._compute_vol_loss(z)
 
         # Compute NMSEs
         nmse_rec = rec_loss / self._data_var

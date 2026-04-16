@@ -80,6 +80,8 @@ class Args:
     """Pruning strategy to use: 'plummet' or 'lognorm'."""
     alpha: float = 0.0
     """(lognorm only) Blending factor between reference and current distribution."""
+    decorrelate_volume: bool = False
+    """Add off-diagonal correlation penalty to volume loss to prevent correlated latent dims."""
 
     # Architecture
     resize_dimensions: tuple[int, int] = (100, 100)
@@ -150,6 +152,7 @@ if __name__ == "__main__":
         pruning_threshold=args.pruning_threshold,
         pruning_strategy=args.pruning_strategy,
         alpha=args.alpha,
+        decorrelate_volume=args.decorrelate_volume,
     ).to(device)
 
     # ---- DataLoader ----
