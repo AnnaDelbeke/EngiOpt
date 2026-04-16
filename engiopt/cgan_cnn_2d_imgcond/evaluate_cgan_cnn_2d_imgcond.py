@@ -67,6 +67,12 @@ if __name__ == "__main__":
 
         ### Set Up Generator ###
         alias = f"run_{args.run_id}" if args.run_id is not None else f"seed_{seed}"
+        if args.run_id is None and args.lvae_condition_filter_key is not None:
+            if args.lvae_condition_filter_range is not None:
+                lo, hi = args.lvae_condition_filter_range
+                alias += f"_{args.lvae_condition_filter_key}_{lo}-{hi}"
+            elif fv is not None:
+                alias += f"_{args.lvae_condition_filter_key}_{fv}"
         if args.wandb_entity is not None:
             artifact_path = (
                 f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_cgan_cnn_2d_imgcond_generator:{alias}"

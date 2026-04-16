@@ -29,6 +29,7 @@ import tyro
 from engiopt.transforms import get_image_condition_keys
 from engiopt.transforms import get_image_condition_shape
 from engiopt.transforms import get_scalar_condition_keys
+from engiopt.vanilla_lvae.utils import filter_dataset_by_condition
 import wandb
 
 
@@ -74,6 +75,16 @@ class Args:
     """interval between image samples"""
     img_resize_dim: int = 16
     """Spatial resolution to resize image conditions before flattening."""
+
+    # Dataset filtering
+    condition_filter_key: str | None = None
+    """Condition key to filter dataset on (e.g., 'weight'). None = use all data."""
+    condition_filter_value: float | None = None
+    """Exact value to match (within tolerance). Mutually exclusive with condition_filter_range."""
+    condition_filter_range: tuple[float, float] | None = None
+    """Inclusive [lo, hi] range to filter on. Overrides condition_filter_value."""
+    condition_filter_tolerance: float = 0.01
+    """Tolerance for exact-value matching."""
 
 
 class Generator(nn.Module):
@@ -205,14 +216,25 @@ if __name__ == "__main__":
 
     design_shape = problem.design_space.shape
     conditions = problem.conditions
-    scalar_cond_keys = get_scalar_condition_keys(problem, problem.dataset["train"])
+    train_split = problem.dataset["train"]
+    if args.condition_filter_key is not None:
+        train_split = filter_dataset_by_condition(
+            train_split,
+            args.condition_filter_key,
+            value=args.condition_filter_value,
+            value_range=args.condition_filter_range,
+            tolerance=args.condition_filter_tolerance,
+        )
+        print(f"Filtered training set to {len(train_split)} samples on {args.condition_filter_key}")
+
+    scalar_cond_keys = get_scalar_condition_keys(problem, train_split)
     n_scalar_conds = len(scalar_cond_keys)
 
-    img_cond_keys = get_image_condition_keys(problem, problem.dataset["train"])
+    img_cond_keys = get_image_condition_keys(problem, train_split)
     n_img_conds = len(img_cond_keys)
     img_cond_shape: tuple[int, ...] | None = None
     if n_img_conds > 0:
-        img_cond_shape = get_image_condition_shape(problem.dataset["train"], img_cond_keys)
+        img_cond_shape = get_image_condition_shape(train_split, img_cond_keys)
 
     # Logging
     algo = os.path.basename(__file__)[: -len(".py")]
@@ -251,7 +273,7 @@ if __name__ == "__main__":
     adversarial_loss.to(device)
 
     # Configure data loader
-    training_ds = problem.dataset.with_format("torch", device=device)["train"]
+    training_ds = train_split.with_format("torch", device=device)
 
     # Build dataset tensors: designs, then scalar conds, then optionally image conds
     ds_tensors: list[th.Tensor] = [
@@ -430,7 +452,14 @@ if __name__ == "__main__":
                         artifact_disc = wandb.Artifact(f"{args.problem_id}_cgan_2d_imgcond_discriminator", type="model")
                         artifact_disc.add_file("discriminator.pth")
 
-                        wandb.log_artifact(artifact_gen, aliases=[f"seed_{args.seed}"])
-                        wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
+                        alias = f"seed_{args.seed}"
+                        if args.condition_filter_key is not None:
+                            if args.condition_filter_range is not None:
+                                lo, hi = args.condition_filter_range
+                                alias += f"_{args.condition_filter_key}_{lo}-{hi}"
+                            elif args.condition_filter_value is not None:
+                                alias += f"_{args.condition_filter_key}_{args.condition_filter_value}"
+                        wandb.log_artifact(artifact_gen, aliases=[alias])
+                        wandb.log_artifact(artifact_disc, aliases=[alias])
 
     wandb.finish()
