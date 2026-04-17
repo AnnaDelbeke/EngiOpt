@@ -85,8 +85,11 @@ class Generator(nn.Module):
     """Conditional GAN generator that outputs 100 x 100 images.
 
     Supports both scalar and image conditions. Scalar conditions are processed
-    through a learned path to 7x7 feature maps. Image conditions are spatially
-    resized to 7x7 and concatenated at the first upsampling stage.
+    through a learned path to 7x7 feature maps. Image conditions are injected
+    at every upsampling stage via spatial concatenation at the corresponding
+    resolution: 7x7, 13x13, 25x25, 50x50. This multi-scale injection ensures
+    the generator sees spatial detail from image conditions at all resolutions,
+    matching the information available to the discriminator.
 
     Args:
         latent_dim: Dimensionality of the noise (latent) vector.
@@ -96,6 +99,9 @@ class Generator(nn.Module):
         num_filters: Number of filters in each upsampling stage.
         out_channels: Number of output channels in the final image.
     """
+
+    # Spatial sizes at each stage of the generator
+    _STAGE_SIZES = [(7, 7), (13, 13), (25, 25), (50, 50)]
 
     def __init__(  # noqa: PLR0913
         self,
@@ -123,28 +129,40 @@ class Generator(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        # After concat: z_feat + c_feat + img_conds = num_filters[0] + n_img_conds channels
-        # When n_img_conds=0 this is just num_filters[0], identical to original.
-        up_in_channels = num_filters[0] + n_img_conds
+        # Each upsampling stage receives n_img_conds extra channels from the resized image conditions.
+        # When n_img_conds=0 the extra channels vanish and the architecture is identical to the original.
+        ic = n_img_conds  # shorthand
 
-        # 4 upsampling layers: 7x7 -> 13x13 -> 25x25 -> 50x50 -> 100x100
-        self.up_blocks = nn.Sequential(
-            # 7x7 -> 13x13 (kernel=3, stride=2, pad=1)
-            nn.ConvTranspose2d(up_in_channels, num_filters[1], kernel_size=3, stride=2, padding=1, bias=False),
+        # 7x7 -> 13x13
+        self.up1 = nn.Sequential(
+            nn.ConvTranspose2d(num_filters[0] + ic, num_filters[1], kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(num_filters[1]),
             nn.ReLU(inplace=True),
-            # 13x13 -> 25x25 (kernel=3, stride=2, pad=1)
-            nn.ConvTranspose2d(num_filters[1], num_filters[2], kernel_size=3, stride=2, padding=1, bias=False),
+        )
+        # 13x13 -> 25x25
+        self.up2 = nn.Sequential(
+            nn.ConvTranspose2d(num_filters[1] + ic, num_filters[2], kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(num_filters[2]),
             nn.ReLU(inplace=True),
-            # 25x25 -> 50x50 (kernel=4, stride=2, pad=1)
-            nn.ConvTranspose2d(num_filters[2], num_filters[3], kernel_size=4, stride=2, padding=1, bias=False),
+        )
+        # 25x25 -> 50x50
+        self.up3 = nn.Sequential(
+            nn.ConvTranspose2d(num_filters[2] + ic, num_filters[3], kernel_size=4, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(num_filters[3]),
             nn.ReLU(inplace=True),
-            # 50x50 -> 100x100 (kernel=4, stride=2, pad=1)
-            nn.ConvTranspose2d(num_filters[3], out_channels, kernel_size=4, stride=2, padding=1, bias=False),
+        )
+        # 50x50 -> 100x100
+        self.up4 = nn.Sequential(
+            nn.ConvTranspose2d(num_filters[3] + ic, out_channels, kernel_size=4, stride=2, padding=1, bias=False),
             nn.Tanh(),
         )
+
+    def _concat_img_conds(self, x: th.Tensor, img_conds: th.Tensor | None, size: tuple[int, int]) -> th.Tensor:
+        """Resize image conditions to *size* and concatenate along the channel dim."""
+        if self.n_img_conds > 0 and img_conds is not None:
+            resized = th.nn.functional.interpolate(img_conds, size=size, mode="bilinear", align_corners=False)
+            return th.cat([x, resized], dim=1)
+        return x
 
     def forward(self, z: th.Tensor, scalar_conds: th.Tensor, img_conds: th.Tensor | None = None) -> th.Tensor:
         """Forward pass for the Generator.
@@ -160,19 +178,20 @@ class Generator(nn.Module):
         # Run noise & scalar conditions through separate stems
         z_feat = self.z_path(z)  # -> (B, num_filters[0]//2, 7, 7)
         c_feat = self.c_path(scalar_conds)  # -> (B, num_filters[0]//2, 7, 7)
+        x = th.cat([z_feat, c_feat], dim=1)  # (B, num_filters[0], 7, 7)
 
-        # Concat along channel dim, optionally including spatially-resized image conditions
-        if self.n_img_conds > 0 and img_conds is not None:
-            resized_img = th.nn.functional.interpolate(img_conds, size=(7, 7), mode="bilinear", align_corners=False)
-            x = th.cat([z_feat, c_feat, resized_img], dim=1)  # (B, num_filters[0] + n_img_conds, 7, 7)
-        else:
-            x = th.cat([z_feat, c_feat], dim=1)  # (B, num_filters[0], 7, 7)
-
-        # Upsample through the main blocks
-        out = self.up_blocks(x)  # -> (B, out_channels, 100, 100)
+        # Multi-scale image condition injection at each upsampling stage
+        x = self._concat_img_conds(x, img_conds, self._STAGE_SIZES[0])  # 7x7
+        x = self.up1(x)  # -> 13x13
+        x = self._concat_img_conds(x, img_conds, self._STAGE_SIZES[1])  # 13x13
+        x = self.up2(x)  # -> 25x25
+        x = self._concat_img_conds(x, img_conds, self._STAGE_SIZES[2])  # 25x25
+        x = self.up3(x)  # -> 50x50
+        x = self._concat_img_conds(x, img_conds, self._STAGE_SIZES[3])  # 50x50
+        x = self.up4(x)  # -> 100x100
 
         # Resize Image
-        return transforms.Resize((self.design_shape[0], self.design_shape[1]))(out)
+        return transforms.Resize((self.design_shape[0], self.design_shape[1]))(x)
 
 
 class Discriminator(nn.Module):
