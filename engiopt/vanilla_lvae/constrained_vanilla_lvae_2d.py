@@ -15,6 +15,7 @@ from itertools import product
 import os
 import random
 import time
+from typing import Literal
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import matplotlib.pyplot as plt
@@ -80,8 +81,8 @@ class Args:
     """Pruning strategy to use: 'plummet' or 'lognorm'."""
     alpha: float = 0.0
     """(lognorm only) Blending factor between reference and current distribution."""
-    decorrelate_volume: bool = False
-    """Add off-diagonal correlation penalty to volume loss to prevent correlated latent dims."""
+    volume_mode: Literal["axis_aligned", "logdet"] = "axis_aligned"
+    """Volume loss mode: axis_aligned (per-dim stds) or logdet (full covariance)."""
 
     # Architecture
     resize_dimensions: tuple[int, int] = (100, 100)
@@ -152,7 +153,7 @@ if __name__ == "__main__":
         pruning_threshold=args.pruning_threshold,
         pruning_strategy=args.pruning_strategy,
         alpha=args.alpha,
-        decorrelate_volume=args.decorrelate_volume,
+        volume_mode=args.volume_mode,
     ).to(device)
 
     # ---- DataLoader ----
