@@ -166,8 +166,9 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
     during training using either plummet or lognorm pruning strategies.
 
     Strategies:
-        - plummet: Detects sharp drops in sorted variances
+        - plummet: Detects sharp drops in sorted per-axis variances
         - lognorm: Fits log-normal distribution and prunes below percentile
+        - eigenvalue: Detects sharp drops in covariance eigenspectrum (rotation-invariant)
 
     Args:
         encoder: Encoder network.
@@ -223,6 +224,7 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         # EMA statistics (initialized on first batch)
         self._zstd: torch.Tensor | None = None
         self._zmean: torch.Tensor | None = None
+        self._zcov: torch.Tensor | None = None  # EMA covariance for eigenvalue pruning
 
         # Reference distribution for lognorm (set at pruning_epoch)
         self._ref_mu: float | None = None
@@ -271,6 +273,14 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         else:
             self._zstd = torch.lerp(self._zstd, z.std(0), 1 - self._beta)
             self._zmean = torch.lerp(self._zmean, z.mean(0), 1 - self._beta)
+
+        # Track EMA covariance for eigenvalue pruning
+        if self.pruning_strategy == "eigenvalue":
+            batch_cov = torch.cov(z.T)
+            if self._zcov is None:
+                self._zcov = batch_cov
+            else:
+                self._zcov = torch.lerp(self._zcov, batch_cov, 1 - self._beta)
 
     def _compute_vol_loss(self, z: torch.Tensor) -> torch.Tensor:
         """Compute volume loss using the selected volume mode.
@@ -391,6 +401,61 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         self._ref_sigma = log_std.std().item()
 
     @torch.no_grad()
+    def _eigenvalue_prune(self, z_std_active: torch.Tensor) -> torch.Tensor:
+        """Eigenvalue-based pruning: detect sharp drops in covariance eigenspectrum.
+
+        Computes eigenvalues of the EMA covariance matrix (approximated from
+        per-dim stds and the latest batch), applies plummet detection on sqrt
+        of eigenvalues, and marks dimensions corresponding to small eigenvalues.
+
+        This is rotation-invariant: correlated dims that share variance produce
+        one large and one small eigenvalue, correctly pruning the redundant one.
+
+        Args:
+            z_std_active: Standard deviation per active latent dimension (unused
+                directly — eigenvalues come from the stored covariance).
+
+        Returns:
+            Boolean mask where True indicates dimensions to prune (in active-dim space).
+        """
+        if self._zcov is None:
+            return torch.zeros(len(z_std_active), dtype=torch.bool, device=z_std_active.device)
+
+        # Get eigenvalues of the EMA covariance for active dims
+        cov_active = self._zcov[~self._p][:, ~self._p]
+        eigvals = torch.linalg.eigvalsh(cov_active)
+        eigvals = eigvals.clamp_min(1e-12)
+
+        # Sort eigenvalues descending (eigvalsh returns ascending)
+        eigvals_desc = eigvals.flip(0)
+        eig_std = eigvals_desc.sqrt()
+
+        # Apply plummet detection on sqrt(eigenvalues) = principal stds
+        if len(eig_std) < 3:
+            return torch.zeros(len(z_std_active), dtype=torch.bool, device=z_std_active.device)
+
+        log_srt = eig_std.log()
+        d_log = log_srt[1:] - log_srt[:-1]
+        pidx = d_log.argmin()
+        ref = eig_std[pidx]
+        n_keep = pidx.item() + 1
+
+        # If no clear plummet (all eigenvalues similar), don't prune
+        ratio_at_drop = eig_std[pidx + 1] / (ref + 1e-12)
+        if ratio_at_drop > self.pruning_threshold:
+            return torch.zeros(len(z_std_active), dtype=torch.bool, device=z_std_active.device)
+
+        # Mark dimensions with smallest per-axis variance for pruning
+        # We prune (n_active - n_keep) dims with lowest EMA std
+        n_prune = len(z_std_active) - n_keep
+        if n_prune <= 0:
+            return torch.zeros(len(z_std_active), dtype=torch.bool, device=z_std_active.device)
+        _, lowest_idx = z_std_active.topk(n_prune, largest=False)
+        mask = torch.zeros(len(z_std_active), dtype=torch.bool, device=z_std_active.device)
+        mask[lowest_idx] = True
+        return mask
+
+    @torch.no_grad()
     def _prune_step(self, _epoch: int) -> None:
         """Execute pruning step if conditions are met."""
         if self._zstd is None or self._zmean is None:
@@ -398,13 +463,15 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
 
         # Only consider active dimensions; plummet needs ≥2 to detect a drop
         z_std_active = self._zstd[~self._p]
-        min_active = 3 if self.pruning_strategy == "plummet" else 1
+        min_active = 3 if self.pruning_strategy in ("plummet", "eigenvalue") else 1
         if len(z_std_active) < min_active:
             return
 
         # Select pruning strategy
         if self.pruning_strategy == "lognorm":
             cand_active = self._lognorm_prune(z_std_active)
+        elif self.pruning_strategy == "eigenvalue":
+            cand_active = self._eigenvalue_prune(z_std_active)
         else:  # default to plummet
             cand_active = self._plummet_prune(z_std_active)
 
@@ -840,6 +907,7 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         condition_encoder: nn.Module | None = None,
         volume_mode: Literal["axis_aligned", "logdet"] = "axis_aligned",
         cov_penalty_weight: float = 0.0,
+        perf_gamma: float = 1.0,
     ) -> None:
         # Parent uses weights for its loss computation, but we override loss()
         super().__init__(
@@ -863,6 +931,7 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         self.nmse_threshold_perf = nmse_threshold_perf
         self.conditional_decoder = conditional_decoder
         self.condition_encoder = condition_encoder
+        self.perf_gamma = perf_gamma
 
         # Data variances for NMSE computation (must be set via set_* methods)
         self.register_buffer("_data_var", torch.tensor(1.0))
@@ -1028,6 +1097,8 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         # When perf is disabled, only the rec constraint matters.
         # rec+perf are always included to prevent volume from overshooting
         # the threshold in a single step (volume naturally dominates).
+        # perf_gamma scales the perf loss during volume phase to reduce
+        # predictor gradient pressure on the latent space.
         rec_violated = nmse_rec > self.nmse_threshold_rec
         perf_violated = self._perf_enabled and nmse_perf > self.nmse_threshold_perf
         if rec_violated or perf_violated:
@@ -1035,7 +1106,7 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
             return rec_loss + perf_loss
         # All active constraints satisfied - optimize volume with rec+perf floor
         self._vol_active = True
-        return vol_loss + rec_loss + perf_loss
+        return vol_loss + rec_loss + self.perf_gamma * perf_loss
 
     @torch.no_grad()
     def _prune_step(self, epoch: int) -> None:

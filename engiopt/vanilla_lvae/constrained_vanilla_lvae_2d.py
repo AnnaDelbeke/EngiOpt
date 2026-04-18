@@ -78,7 +78,7 @@ class Args:
     pruning_threshold: float = 0.05
     """Threshold for pruning (ratio for plummet, percentile for lognorm)."""
     pruning_strategy: str = "plummet"
-    """Pruning strategy to use: 'plummet' or 'lognorm'."""
+    """Pruning strategy: 'plummet', 'lognorm', or 'eigenvalue' (covariance eigenspectrum)."""
     alpha: float = 0.0
     """(lognorm only) Blending factor between reference and current distribution."""
     volume_mode: Literal["axis_aligned", "logdet"] = "axis_aligned"

@@ -13,10 +13,10 @@ For more information on LVAE, see: https://arxiv.org/abs/2404.17773
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 import os
 import random
 import time
+from typing import Literal
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import matplotlib.colors as mcolors
@@ -93,13 +93,15 @@ class Args:
     pruning_threshold: float = 0.05
     """Threshold for pruning (ratio for plummet, percentile for lognorm)."""
     pruning_strategy: str = "plummet"
-    """Pruning strategy to use: 'plummet' or 'lognorm'."""
+    """Pruning strategy: 'plummet', 'lognorm', or 'eigenvalue' (covariance eigenspectrum)."""
     alpha: float = 0.0
     """(lognorm only) Blending factor between reference and current distribution."""
     volume_mode: Literal["axis_aligned", "logdet"] = "axis_aligned"
     """Volume loss mode: axis_aligned (per-dim stds) or logdet (full covariance)."""
     cov_penalty_weight: float = 0.0
     """Weight for off-diagonal covariance penalty. 0 disables. Operates on raw covariance (not correlation)."""
+    perf_gamma: float = 1.0
+    """Scale factor for perf loss during volume phase. <1 reduces predictor gradient pressure on latent space."""
 
     # Architecture
     resize_dimensions: tuple[int, int] = (100, 100)
@@ -270,6 +272,7 @@ if __name__ == "__main__":
         condition_encoder=condition_encoder,
         volume_mode=args.volume_mode,
         cov_penalty_weight=args.cov_penalty_weight,
+        perf_gamma=args.perf_gamma,
     ).to(device)
 
     # ---- DataLoader ----
