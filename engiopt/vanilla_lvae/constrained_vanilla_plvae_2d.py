@@ -98,6 +98,8 @@ class Args:
     """(lognorm only) Blending factor between reference and current distribution."""
     volume_mode: Literal["axis_aligned", "logdet"] = "axis_aligned"
     """Volume loss mode: axis_aligned (per-dim stds) or logdet (full covariance)."""
+    cov_penalty_weight: float = 0.0
+    """Weight for off-diagonal covariance penalty. 0 disables. Operates on raw covariance (not correlation)."""
 
     # Architecture
     resize_dimensions: tuple[int, int] = (100, 100)
@@ -267,6 +269,7 @@ if __name__ == "__main__":
         conditional_decoder=args.conditional_decoder,
         condition_encoder=condition_encoder,
         volume_mode=args.volume_mode,
+        cov_penalty_weight=args.cov_penalty_weight,
     ).to(device)
 
     # ---- DataLoader ----

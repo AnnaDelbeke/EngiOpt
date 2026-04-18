@@ -202,6 +202,7 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         alpha: float = 0,
         *,
         volume_mode: Literal["axis_aligned", "logdet"] = "axis_aligned",
+        cov_penalty_weight: float = 0.0,
     ) -> None:
         if weights is None:
             weights = [1.0, 0.001]
@@ -217,6 +218,7 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         self.pruning_strategy = pruning_strategy
         self.alpha = alpha
         self.volume_mode = volume_mode
+        self.cov_penalty_weight = cov_penalty_weight
 
         # EMA statistics (initialized on first batch)
         self._zstd: torch.Tensor | None = None
@@ -281,6 +283,11 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
                 correlations: if two dims are redundant the effective volume
                 shrinks, giving gradient to decorrelate or collapse one dim.
 
+        When cov_penalty_weight > 0, appends mean(off_diag(Σ)²) scaled by
+        the weight. Unlike the old correlation-based penalty, this operates on
+        raw covariance — high-variance correlated dims get proportionally
+        stronger gradients instead of being normalized away.
+
         Args:
             z: Latent codes of shape (batch_size, latent_dim).
 
@@ -300,14 +307,21 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
             # Pruned dims contribute independently (diagonal covariance)
             logdet_frozen = 2.0 * torch.log(self._frozen_std[self._p]).sum() if self._p.any() else 0.0
 
-            # Reduces to axis_aligned when dims are uncorrelated
-            return torch.exp((logdet_active + logdet_frozen) / (2.0 * d_total))
+            vol_loss = torch.exp((logdet_active + logdet_frozen) / (2.0 * d_total))
+        else:
+            # axis_aligned: geometric mean of per-dimension stds
+            s = self._frozen_std.clone()
+            if active.any():
+                s[active] = z[:, active].std(0)
+            vol_loss = torch.exp(torch.log(s).mean())
 
-        # axis_aligned: geometric mean of per-dimension stds
-        s = self._frozen_std.clone()
-        if active.any():
-            s[active] = z[:, active].std(0)
-        return torch.exp(torch.log(s).mean())
+        if self.cov_penalty_weight > 0 and active.sum() > 1:
+            z_active = z[:, active]
+            cov = torch.cov(z_active.T)
+            mask = ~torch.eye(cov.shape[0], dtype=torch.bool, device=cov.device)
+            vol_loss = vol_loss + self.cov_penalty_weight * cov[mask].pow(2).mean()
+
+        return vol_loss
 
     @torch.no_grad()
     def _plummet_prune(self, z_std: torch.Tensor) -> torch.Tensor:
@@ -467,6 +481,7 @@ class PerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         alpha: float = 0,
         *,
         volume_mode: Literal["axis_aligned", "logdet"] = "axis_aligned",
+        cov_penalty_weight: float = 0.0,
     ) -> None:
         if weights is None:
             weights = [1.0, 1.0, 0.001]
@@ -483,6 +498,7 @@ class PerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
             pruning_strategy=pruning_strategy,
             alpha=alpha,
             volume_mode=volume_mode,
+            cov_penalty_weight=cov_penalty_weight,
         )
         self.predictor = predictor
 
@@ -556,6 +572,7 @@ class ConstrainedLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         alpha: float = 0,
         *,
         volume_mode: Literal["axis_aligned", "logdet"] = "axis_aligned",
+        cov_penalty_weight: float = 0.0,
     ) -> None:
         # Parent uses weights for its loss computation, but we override loss()
         super().__init__(
@@ -571,6 +588,7 @@ class ConstrainedLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
             pruning_strategy=pruning_strategy,
             alpha=alpha,
             volume_mode=volume_mode,
+            cov_penalty_weight=cov_penalty_weight,
         )
         self.nmse_threshold = nmse_threshold
 
@@ -703,6 +721,7 @@ class InterpretablePerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: 
         alpha: float = 0,
         *,
         volume_mode: Literal["axis_aligned", "logdet"] = "axis_aligned",
+        cov_penalty_weight: float = 0.0,
     ) -> None:
         if weights is None:
             weights = [1.0, 0.1, 0.001]
@@ -719,6 +738,7 @@ class InterpretablePerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: 
             pruning_strategy=pruning_strategy,
             alpha=alpha,
             volume_mode=volume_mode,
+            cov_penalty_weight=cov_penalty_weight,
         )
         self.predictor = predictor
         self.perf_dim = perf_dim
@@ -819,6 +839,7 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         conditional_decoder: bool = False,
         condition_encoder: nn.Module | None = None,
         volume_mode: Literal["axis_aligned", "logdet"] = "axis_aligned",
+        cov_penalty_weight: float = 0.0,
     ) -> None:
         # Parent uses weights for its loss computation, but we override loss()
         super().__init__(
@@ -834,6 +855,7 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
             pruning_strategy=pruning_strategy,
             alpha=alpha,
             volume_mode=volume_mode,
+            cov_penalty_weight=cov_penalty_weight,
         )
         self.predictor = predictor
         self.perf_dim = perf_dim
