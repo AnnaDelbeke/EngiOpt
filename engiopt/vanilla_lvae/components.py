@@ -49,31 +49,6 @@ class SNLinearCombo(nn.Module):
         return self.activation(self.linear(x))
 
 
-class SNDiagonalLayer(nn.Module):
-    """Element-wise scaling with spectral normalization + ReLU.
-
-    Like SNLinearCombo but with a diagonal weight matrix: each output depends
-    only on its corresponding input dimension, preventing the predictor from
-    learning off-axis linear combinations that cause correlated latent dims.
-
-    The spectral norm of a diagonal matrix is max(|w_i|), so we normalize by
-    that to ensure 1-Lipschitz continuity per forward pass.
-
-    Args:
-        dim: Number of input (and output) features.
-    """
-
-    def __init__(self, dim: int):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim))
-        self.activation = nn.ReLU(inplace=True)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass: element-wise scale then activate."""
-        w = self.weight / (self.weight.abs().max() + 1e-12)
-        return self.activation(x * w)
-
-
 class Encoder2D(nn.Module):
     """Convolutional encoder for 2D designs.
 
@@ -320,12 +295,6 @@ class SNMLPPredictor(nn.Module):
         hidden_dims: Tuple of hidden layer widths (default: (256, 128))
         lipschitz_scale: Effective Lipschitz bound of the predictor. The overall
             Lipschitz constant equals exactly this value. Default: 1.0.
-        axis_aligned: If True, the first hidden layer is a diagonal element-wise
-            scaling (SNDiagonalLayer) instead of a full linear layer. This prevents
-            the predictor from learning off-axis linear combinations of latent dims,
-            which can cause correlated latent dimensions under volume regularization.
-            Subsequent layers remain full linear, so the predictor can still learn
-            nonlinear compositions of individual dims. Default: False.
     """
 
     def __init__(
@@ -334,8 +303,6 @@ class SNMLPPredictor(nn.Module):
         output_dim: int,
         hidden_dims: tuple[int, ...] = (256, 128),
         lipschitz_scale: float = 1.0,
-        *,
-        axis_aligned: bool = False,
     ):
         super().__init__()
         self.lipschitz_scale = lipschitz_scale
@@ -343,14 +310,9 @@ class SNMLPPredictor(nn.Module):
         # Hidden layers with spectral normalization
         hidden_layers: list[nn.Module] = []
         prev_dim = input_dim
-        for i, hidden_dim in enumerate(hidden_dims):
-            if i == 0 and axis_aligned:
-                # Diagonal first layer: each output depends only on its input dim
-                hidden_layers.append(SNDiagonalLayer(prev_dim))
-                # prev_dim unchanged — diagonal layer preserves dimensionality
-            else:
-                hidden_layers.append(SNLinearCombo(prev_dim, hidden_dim))
-                prev_dim = hidden_dim
+        for hidden_dim in hidden_dims:
+            hidden_layers.append(SNLinearCombo(prev_dim, hidden_dim))
+            prev_dim = hidden_dim
         self.hidden = nn.Sequential(*hidden_layers)
 
         # Final layer: spectral normalized Linear (no activation)
@@ -437,7 +399,6 @@ class ConditionEncoder2D(nn.Module):
 __all__ = [
     "ConditionEncoder2D",
     "Encoder2D",
-    "SNDiagonalLayer",
     "SNLinearCombo",
     "SNMLPPredictor",
     "TrueSNDecoder2D",

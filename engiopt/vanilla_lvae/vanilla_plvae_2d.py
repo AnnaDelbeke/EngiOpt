@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import partial
 from itertools import product
+import math
 import os
 import random
 import time
@@ -88,13 +89,9 @@ class Args:
     pruning_threshold: float = 0.05
     """Threshold for pruning (ratio for plummet, percentile for lognorm)."""
     pruning_strategy: str = "plummet"
-    """Pruning strategy: 'plummet', 'lognorm', or 'eigenvalue' (covariance eigenspectrum)."""
+    """Pruning strategy: 'plummet' or 'lognorm'."""
     alpha: float = 0.0
     """(lognorm only) Blending factor between reference and current distribution."""
-    volume_mode: Literal["axis_aligned", "logdet"] = "axis_aligned"
-    """Volume loss mode: axis_aligned (per-dim stds) or logdet (full covariance)."""
-    cov_penalty_weight: float = 0.0
-    """Weight for off-diagonal covariance penalty. 0 disables. Operates on raw covariance (not correlation)."""
 
     # Volume weight warmup
     volume_warmup_epochs: int = 0
@@ -111,10 +108,10 @@ class Args:
     """Whether to include conditions in performance prediction (True) or use only latent codes (False)."""
     decoder_lipschitz_scale: float = 1.0
     """Lipschitz bound for spectrally normalized decoder. Controls output scaling."""
-    predictor_lipschitz_scale: float = 1.0
-    """Lipschitz bound for spectrally normalized MLP predictor. Controls output scaling."""
-    predictor_axis_aligned: bool = False
-    """Use diagonal first layer in predictor to prevent off-axis latent correlations."""
+    predictor_lipschitz_ratio: float = 1.0
+    """Ratio multiplier for auto-scaled predictor Lipschitz bound. Effective bound is
+    ratio * L_dec * sqrt(n_perf / design_dim), which equalizes gradient pressure between
+    reconstruction and performance losses regardless of problem dimensionality."""
     perf_scaler: Literal["robust", "quantile"] = "robust"
     """Scaler for performance values. 'robust' preserves cardinal structure (RobustScaler);
     'quantile' maps to N(0,1) via rank transform (QuantileTransformer), making Lipschitz
@@ -202,13 +199,17 @@ if __name__ == "__main__":
     n_perf = len(obj_keys)
 
     # Build MLP predictor (input: perf_dim latent dims + conditions if conditional)
+    # Auto-scale predictor Lipschitz bound to equalize gradient pressure with decoder:
+    #   L_pred = ratio * L_dec * sqrt(n_perf / design_dim)
+    design_dim = math.prod(design_shape)
+    predictor_lipschitz_scale = args.predictor_lipschitz_ratio * args.decoder_lipschitz_scale * math.sqrt(n_perf / design_dim)
+
     predictor_input_dim = perf_dim + (n_conds if args.conditional_predictor else 0)
     predictor = SNMLPPredictor(
         input_dim=predictor_input_dim,
         output_dim=n_perf,
         hidden_dims=args.predictor_hidden_dims,
-        lipschitz_scale=args.predictor_lipschitz_scale,
-        axis_aligned=args.predictor_axis_aligned,
+        lipschitz_scale=predictor_lipschitz_scale,
     )
 
     print(f"\n{'=' * 60}")
@@ -218,7 +219,7 @@ if __name__ == "__main__":
     print(f"Decoder: TrueSNDecoder2D (lipschitz_scale={args.decoder_lipschitz_scale})")
     print(f"Perf dim: {perf_dim} (first {perf_dim} dims predict performance)")
     print(f"Predictor mode: {'Conditional' if args.conditional_predictor else 'Unconditional'}")
-    print(f"Predictor: SNMLPPredictor (lipschitz_scale={args.predictor_lipschitz_scale}, axis_aligned={args.predictor_axis_aligned})")
+    print(f"Predictor: SNMLPPredictor (lipschitz_scale={predictor_lipschitz_scale:.6f}, ratio={args.predictor_lipschitz_ratio}, design_dim={design_dim}, n_perf={n_perf})")
     print(
         f"Predictor input: {predictor_input_dim} (perf_dim={perf_dim}, n_conds={n_conds if args.conditional_predictor else 0})"
     )
@@ -229,6 +230,10 @@ if __name__ == "__main__":
         print(f"Alpha (lognorm): {args.alpha}")
     print(f"Volume warmup epochs: {args.volume_warmup_epochs}")
     print(f"{'=' * 60}\n")
+
+    # Log computed predictor_lipschitz_scale to wandb for model reconstruction
+    if args.track:
+        wandb.config.update({"predictor_lipschitz_scale": predictor_lipschitz_scale})
 
     # Weight schedule (ramps volume weight if warmup_epochs > 0, otherwise constant)
     weights = partial(
@@ -256,8 +261,6 @@ if __name__ == "__main__":
         pruning_threshold=args.pruning_threshold,
         pruning_strategy=args.pruning_strategy,
         alpha=args.alpha,
-        volume_mode=args.volume_mode,
-        cov_penalty_weight=args.cov_penalty_weight,
     ).to(device)
 
     # ---- DataLoader ----

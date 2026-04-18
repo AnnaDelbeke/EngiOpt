@@ -15,7 +15,6 @@ from itertools import product
 import os
 import random
 import time
-from typing import Literal
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import matplotlib.pyplot as plt
@@ -78,13 +77,9 @@ class Args:
     pruning_threshold: float = 0.05
     """Threshold for pruning (ratio for plummet, percentile for lognorm)."""
     pruning_strategy: str = "plummet"
-    """Pruning strategy: 'plummet', 'lognorm', or 'eigenvalue' (covariance eigenspectrum)."""
+    """Pruning strategy: 'plummet' or 'lognorm'."""
     alpha: float = 0.0
     """(lognorm only) Blending factor between reference and current distribution."""
-    volume_mode: Literal["axis_aligned", "logdet"] = "axis_aligned"
-    """Volume loss mode: axis_aligned (per-dim stds) or logdet (full covariance)."""
-    cov_penalty_weight: float = 0.0
-    """Weight for off-diagonal covariance penalty. 0 disables. Operates on raw covariance (not correlation)."""
 
     # Architecture
     resize_dimensions: tuple[int, int] = (100, 100)
@@ -155,8 +150,6 @@ if __name__ == "__main__":
         pruning_threshold=args.pruning_threshold,
         pruning_strategy=args.pruning_strategy,
         alpha=args.alpha,
-        volume_mode=args.volume_mode,
-        cov_penalty_weight=args.cov_penalty_weight,
     ).to(device)
 
     # ---- DataLoader ----
