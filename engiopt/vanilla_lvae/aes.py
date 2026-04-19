@@ -627,8 +627,13 @@ class ConstrainedLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
 
     @torch.no_grad()
     def _prune_step(self, epoch: int) -> None:
-        """Execute pruning unconditionally after pruning_epoch."""
-        super()._prune_step(epoch)
+        """Only prune when the reconstruction constraint is satisfied.
+
+        Pruning reduces model capacity, so doing it while reconstruction
+        is still violated would make things worse.
+        """
+        if self._vol_active:
+            super()._prune_step(epoch)
 
 
 class InterpretablePerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
@@ -899,9 +904,7 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         self._perf_var = torch.tensor(var, device=self._perf_var.device)
         self._perf_var_set = True
 
-    def _build_cond_embedding(
-        self, c_scalar: torch.Tensor, c_img: torch.Tensor | None
-    ) -> torch.Tensor | None:
+    def _build_cond_embedding(self, c_scalar: torch.Tensor, c_img: torch.Tensor | None) -> torch.Tensor | None:
         """Build combined condition embedding from scalar and image conditions.
 
         Args:
@@ -992,8 +995,13 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
 
     @torch.no_grad()
     def _prune_step(self, epoch: int) -> None:
-        """Execute pruning unconditionally after pruning_epoch."""
-        super()._prune_step(epoch)
+        """Only prune when both rec and perf constraints are satisfied.
+
+        Pruning reduces model capacity, so doing it while constraints
+        are still violated would make things worse.
+        """
+        if self._vol_active:
+            super()._prune_step(epoch)
 
 
 __all__ = [
