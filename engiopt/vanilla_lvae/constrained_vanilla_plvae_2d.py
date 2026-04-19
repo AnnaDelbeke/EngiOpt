@@ -109,9 +109,9 @@ class Args:
     """Whether to condition the decoder on scalar + image conditions for multi-modality measurement."""
     cond_embed_dim: int = 64
     """Dimensionality of image condition embedding (only used when image conditions exist)."""
-    encoder_ortho_weight: float = 0.0
-    """Weight for orthogonal regularization on the encoder's final layer. Penalizes
-    ||W^T W - I||_F to encourage decorrelated latent dimensions. 0 = disabled."""
+    whitening: bool = False
+    """Apply PCA-rotation whitening after the encoder to decorrelate latent dimensions
+    by construction. Preserves per-dimension variance for volume regularization."""
     decoder_lipschitz_scale: float = 1.0
     """Lipschitz bound for spectrally normalized decoder. Controls output scaling."""
     predictor_lipschitz_ratio: float = 1.0
@@ -182,7 +182,7 @@ if __name__ == "__main__":
         device = th.device("cpu")
 
     # Build encoder (always unconditional — sees design only)
-    enc = Encoder2D(args.latent_dim, design_shape, args.resize_dimensions)
+    enc = Encoder2D(args.latent_dim, design_shape, args.resize_dimensions, whitening=args.whitening)
 
     # Build condition encoder for image conditions (if any)
     condition_encoder: ConditionEncoder2D | None = None
@@ -222,7 +222,9 @@ if __name__ == "__main__":
     # MSE over design_dim pixels dilutes decoder gradients; this compensates so the
     # predictor has enough capacity to shape the latent space for performance.
     design_dim = math.prod(design_shape)
-    predictor_lipschitz_scale = args.predictor_lipschitz_ratio * args.decoder_lipschitz_scale * math.sqrt(design_dim / n_perf)
+    predictor_lipschitz_scale = (
+        args.predictor_lipschitz_ratio * args.decoder_lipschitz_scale * math.sqrt(design_dim / n_perf)
+    )
 
     predictor_input_dim = perf_dim + cond_dim_for_predictor
     predictor = SNMLPPredictor(
@@ -240,7 +242,9 @@ if __name__ == "__main__":
     print(f"Decoder mode: {'Conditional' if args.conditional_decoder else 'Unconditional'}")
     print(f"Perf dim: {perf_dim} (first {perf_dim} dims predict performance)")
     print(f"Predictor mode: {'Conditional' if args.conditional_predictor else 'Unconditional'}")
-    print(f"Predictor: SNMLPPredictor (lipschitz_scale={predictor_lipschitz_scale:.6f}, ratio={args.predictor_lipschitz_ratio}, design_dim={design_dim}, n_perf={n_perf})")
+    print(
+        f"Predictor: SNMLPPredictor (lipschitz_scale={predictor_lipschitz_scale:.6f}, ratio={args.predictor_lipschitz_ratio}, design_dim={design_dim}, n_perf={n_perf})"
+    )
     print(f"Predictor input: {predictor_input_dim} (perf_dim={perf_dim}, cond_dim={cond_dim_for_predictor})")
     if n_img_conds > 0:
         print(f"Image conditions: {n_img_conds} channel(s), embed_dim={img_cond_embed_dim}")
@@ -251,8 +255,8 @@ if __name__ == "__main__":
     print(f"Pruning threshold: {args.pruning_threshold}")
     if args.pruning_strategy == "lognorm":
         print(f"Alpha (lognorm): {args.alpha}")
-    if args.encoder_ortho_weight > 0:
-        print(f"Encoder ortho reg: weight={args.encoder_ortho_weight}")
+    if args.whitening:
+        print("Latent whitening: enabled (PCA-rotation decorrelation)")
     print(f"{'=' * 60}\n")
 
     # Log computed predictor_lipschitz_scale to wandb for model reconstruction
@@ -341,7 +345,9 @@ if __name__ == "__main__":
         p_scaler = RobustScaler()
     p_train_scaled = th.from_numpy(p_scaler.fit_transform(p_train.numpy())).to(p_train.dtype)
     p_val_scaled = th.from_numpy(p_scaler.transform(p_val.numpy())).to(p_val.dtype)
-    print(f"Performance scaler: {args.perf_scaler} | scaled range: [{p_train_scaled.min():.3f}, {p_train_scaled.max():.3f}]")
+    print(
+        f"Performance scaler: {args.perf_scaler} | scaled range: [{p_train_scaled.min():.3f}, {p_train_scaled.max():.3f}]"
+    )
 
     # Scale conditions using RobustScaler (if using conditional predictor or conditional decoder)
     if args.conditional_predictor or args.conditional_decoder:
@@ -396,14 +402,6 @@ if __name__ == "__main__":
             batch_tuple = (x_batch, c_batch, p_batch, ic_batch) if ic_batch is not None else (x_batch, c_batch, p_batch)
             loss = plvae.loss(batch_tuple)
 
-            # Orthogonal regularization on encoder final layer: ||W^T W - I||_F
-            # Encourages decorrelated latent dims by making encoder filters orthogonal
-            if args.encoder_ortho_weight > 0:
-                W = enc.to_latent.weight.flatten(1)  # (latent_dim, 512*7*7)
-                WtW = W @ W.T  # (latent_dim, latent_dim)
-                ortho_loss = th.linalg.norm(WtW - th.eye(W.size(0), device=W.device)) / W.size(0)
-                loss = loss + args.encoder_ortho_weight * ortho_loss
-
             loss.backward()
             plvae.optim.step()
 
@@ -438,8 +436,6 @@ if __name__ == "__main__":
                     "active_dims": plvae.dim,
                     "epoch": epoch,
                 }
-                if args.encoder_ortho_weight > 0:
-                    log_dict["ortho_loss"] = ortho_loss.item()
                 wandb.log(log_dict)
 
                 print(
@@ -599,17 +595,42 @@ if __name__ == "__main__":
                             boundaries = np.percentile(all_perf, np.linspace(0, 100, 256))
                             boundaries = np.unique(boundaries)  # remove duplicates from ties
                             norm = mcolors.BoundaryNorm(boundaries, ncolors=256)
-                            sc = ax.scatter(z_tr_np[:, d0], z_tr_np[:, d1], c=p_actual[:, oi],
-                                            s=12, alpha=0.5, cmap="viridis", norm=norm)
-                            ax.scatter(z_val_np[:, d0], z_val_np[:, d1], c=p_val_actual[:, oi],
-                                       s=40, alpha=0.8, marker="x", cmap="viridis", norm=norm)
+                            sc = ax.scatter(
+                                z_tr_np[:, d0],
+                                z_tr_np[:, d1],
+                                c=p_actual[:, oi],
+                                s=12,
+                                alpha=0.5,
+                                cmap="viridis",
+                                norm=norm,
+                            )
+                            ax.scatter(
+                                z_val_np[:, d0],
+                                z_val_np[:, d1],
+                                c=p_val_actual[:, oi],
+                                s=40,
+                                alpha=0.8,
+                                marker="x",
+                                cmap="viridis",
+                                norm=norm,
+                            )
                             if oi == 0:
                                 for j in range(n_tr_viz):
-                                    ax.annotate(str(j), (z_tr_np[tr_viz_idx[j], d0], z_tr_np[tr_viz_idx[j], d1]),
-                                                fontsize=7, alpha=0.7, color="k")
+                                    ax.annotate(
+                                        str(j),
+                                        (z_tr_np[tr_viz_idx[j], d0], z_tr_np[tr_viz_idx[j], d1]),
+                                        fontsize=7,
+                                        alpha=0.7,
+                                        color="k",
+                                    )
                                 for j in range(n_va_viz):
-                                    ax.annotate(f"V{j}", (z_val_np[va_viz_idx[j], d0], z_val_np[va_viz_idx[j], d1]),
-                                                fontsize=7, fontweight="bold", color="red")
+                                    ax.annotate(
+                                        f"V{j}",
+                                        (z_val_np[va_viz_idx[j], d0], z_val_np[va_viz_idx[j], d1]),
+                                        fontsize=7,
+                                        fontweight="bold",
+                                        color="red",
+                                    )
                             ax.set(xlabel=f"z[{d0}]", ylabel=f"z[{d1}]")
                             ax.set_title(obj_keys[oi])
                             fig.colorbar(sc, ax=ax)

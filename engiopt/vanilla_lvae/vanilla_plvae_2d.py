@@ -102,6 +102,9 @@ class Args:
     # Architecture
     resize_dimensions: tuple[int, int] = (100, 100)
     """Dimensions to resize input images to before encoding/decoding."""
+    whitening: bool = False
+    """Apply PCA-rotation whitening after the encoder to decorrelate latent dimensions
+    by construction. Preserves per-dimension variance for volume regularization."""
     predictor_hidden_dims: tuple[int, ...] = (256, 128)
     """Hidden dimensions for the MLP predictor."""
     conditional_predictor: bool = False
@@ -190,7 +193,7 @@ if __name__ == "__main__":
         device = th.device("cpu")
 
     # Build encoder and decoder
-    enc = Encoder2D(args.latent_dim, design_shape, args.resize_dimensions)
+    enc = Encoder2D(args.latent_dim, design_shape, args.resize_dimensions, whitening=args.whitening)
     dec = TrueSNDecoder2D(args.latent_dim, design_shape, lipschitz_scale=args.decoder_lipschitz_scale)
 
     # Determine perf_dim: if -1 (default), use all latent dimensions
@@ -202,7 +205,9 @@ if __name__ == "__main__":
     # Auto-scale predictor Lipschitz bound to equalize gradient pressure with decoder:
     #   L_pred = ratio * L_dec * sqrt(n_perf / design_dim)
     design_dim = math.prod(design_shape)
-    predictor_lipschitz_scale = args.predictor_lipschitz_ratio * args.decoder_lipschitz_scale * math.sqrt(n_perf / design_dim)
+    predictor_lipschitz_scale = (
+        args.predictor_lipschitz_ratio * args.decoder_lipschitz_scale * math.sqrt(n_perf / design_dim)
+    )
 
     predictor_input_dim = perf_dim + (n_conds if args.conditional_predictor else 0)
     predictor = SNMLPPredictor(
@@ -219,7 +224,9 @@ if __name__ == "__main__":
     print(f"Decoder: TrueSNDecoder2D (lipschitz_scale={args.decoder_lipschitz_scale})")
     print(f"Perf dim: {perf_dim} (first {perf_dim} dims predict performance)")
     print(f"Predictor mode: {'Conditional' if args.conditional_predictor else 'Unconditional'}")
-    print(f"Predictor: SNMLPPredictor (lipschitz_scale={predictor_lipschitz_scale:.6f}, ratio={args.predictor_lipschitz_ratio}, design_dim={design_dim}, n_perf={n_perf})")
+    print(
+        f"Predictor: SNMLPPredictor (lipschitz_scale={predictor_lipschitz_scale:.6f}, ratio={args.predictor_lipschitz_ratio}, design_dim={design_dim}, n_perf={n_perf})"
+    )
     print(
         f"Predictor input: {predictor_input_dim} (perf_dim={perf_dim}, n_conds={n_conds if args.conditional_predictor else 0})"
     )
@@ -302,7 +309,9 @@ if __name__ == "__main__":
         p_scaler = RobustScaler()
     p_train_scaled = th.from_numpy(p_scaler.fit_transform(p_train.numpy())).to(p_train.dtype)
     p_val_scaled = th.from_numpy(p_scaler.transform(p_val.numpy())).to(p_val.dtype)
-    print(f"Performance scaler: {args.perf_scaler} | scaled range: [{p_train_scaled.min():.3f}, {p_train_scaled.max():.3f}]")
+    print(
+        f"Performance scaler: {args.perf_scaler} | scaled range: [{p_train_scaled.min():.3f}, {p_train_scaled.max():.3f}]"
+    )
 
     # Scale conditions using RobustScaler (if using conditional predictor)
     if args.conditional_predictor:

@@ -49,6 +49,71 @@ class SNLinearCombo(nn.Module):
         return self.activation(self.linear(x))
 
 
+class LatentWhitening(nn.Module):
+    """PCA-rotation whitening for latent codes.
+
+    Decorrelates latent dimensions by rotating into the principal component basis
+    derived from a running covariance estimate (EMA). Unlike ZCA whitening, this
+    preserves per-dimension variance — only the rotation is applied, not the
+    scaling to unit variance — so volume regularization and pruning still see
+    meaningful per-dimension scales.
+
+    The rotation matrix is updated with ``torch.no_grad`` and treated as a
+    constant during backprop. Gradients flow through the matrix multiply but
+    the eigendecomposition itself is not differentiated, avoiding numerical
+    instability. Sign-correction keeps eigenvectors aligned across updates.
+
+    Args:
+        dim: Number of latent dimensions.
+        momentum: EMA momentum for running statistics (like BatchNorm). Default: 0.1.
+    """
+
+    running_mean: torch.Tensor
+    running_cov: torch.Tensor
+    _rotation: torch.Tensor
+    num_batches_tracked: torch.Tensor
+
+    def __init__(self, dim: int, momentum: float = 0.1) -> None:
+        super().__init__()
+        self.dim = dim
+        self.momentum = momentum
+        self.register_buffer("running_mean", torch.zeros(dim))
+        self.register_buffer("running_cov", torch.eye(dim))
+        self.register_buffer("_rotation", torch.eye(dim))
+        self.register_buffer("num_batches_tracked", torch.tensor(0, dtype=torch.long))
+
+    @torch.no_grad()
+    def _update_stats(self, z: torch.Tensor) -> None:
+        """Update running mean, covariance, and PCA rotation from a batch."""
+        mean = z.mean(0)
+        centered = z - mean
+        cov = (centered.T @ centered) / max(z.shape[0] - 1, 1)
+
+        self.num_batches_tracked += 1
+        self.running_mean.lerp_(mean, self.momentum)
+        self.running_cov.lerp_(cov, self.momentum)
+
+        # Eigendecomposition of running covariance for PCA rotation
+        _, eigvecs = torch.linalg.eigh(self.running_cov)
+        # Sign correction: align each eigenvector with its predecessor
+        signs = torch.sign((eigvecs * self._rotation).sum(0))
+        signs[signs == 0] = 1
+        self._rotation.copy_(eigvecs * signs)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        """Center and rotate latent codes into decorrelated PCA basis.
+
+        Args:
+            z: Raw latent codes (B, dim).
+
+        Returns:
+            Decorrelated latent codes (B, dim) with diagonal covariance.
+        """
+        if self.training:
+            self._update_stats(z)
+        return (z - self.running_mean) @ self._rotation
+
+
 class Encoder2D(nn.Module):
     """Convolutional encoder for 2D designs.
 
@@ -64,6 +129,8 @@ class Encoder2D(nn.Module):
         latent_dim: Dimension of the latent space.
         design_shape: Original design shape (H, W) for reference.
         resize_dimensions: Dimensions to resize input to before encoding.
+        whitening: If True, apply PCA-rotation whitening after the final
+            convolutional layer to decorrelate latent dimensions by construction.
     """
 
     def __init__(
@@ -71,6 +138,8 @@ class Encoder2D(nn.Module):
         latent_dim: int,
         design_shape: tuple[int, int],
         resize_dimensions: tuple[int, int] = (100, 100),
+        *,
+        whitening: bool = False,
     ) -> None:
         super().__init__()
         self.resize_in = transforms.Resize(resize_dimensions)
@@ -93,6 +162,7 @@ class Encoder2D(nn.Module):
 
         # Final 7x7 conv produces (B, latent_dim, 1, 1) -> flatten to (B, latent_dim)
         self.to_latent = nn.Conv2d(512, latent_dim, kernel_size=7, stride=1, padding=0, bias=True)
+        self.whiten = LatentWhitening(latent_dim) if whitening else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through encoder.
@@ -105,7 +175,10 @@ class Encoder2D(nn.Module):
         """
         x = self.resize_in(x)  # (B, 1, 100, 100)
         h = self.features(x)  # (B, 512, 7, 7)
-        return self.to_latent(h).flatten(1)  # (B, latent_dim)
+        z = self.to_latent(h).flatten(1)  # (B, latent_dim)
+        if self.whiten is not None:
+            z = self.whiten(z)
+        return z
 
 
 class TrueSNDeconv2DCombo(nn.Module):
@@ -399,6 +472,7 @@ class ConditionEncoder2D(nn.Module):
 __all__ = [
     "ConditionEncoder2D",
     "Encoder2D",
+    "LatentWhitening",
     "SNLinearCombo",
     "SNMLPPredictor",
     "TrueSNDecoder2D",

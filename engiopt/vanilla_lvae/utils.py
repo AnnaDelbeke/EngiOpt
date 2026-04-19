@@ -83,6 +83,7 @@ class LVAEConfig:
     conditional_predictor: bool
     nmse_threshold_rec: float
     nmse_threshold_perf: float
+    whitening: bool
     condition_filter_key: str | None = None
     condition_filter_value: float | None = None
     condition_filter_range: tuple[float, float] | None = None
@@ -217,10 +218,10 @@ def load_lvae_encoder(
         decoder_lipschitz_scale=config.get("decoder_lipschitz_scale", 1.0),
         predictor_lipschitz_scale=config.get("predictor_lipschitz_scale", 1.0),
         predictor_hidden_dims=tuple(config.get("predictor_hidden_dims", (256, 128))),
-
         conditional_predictor=config.get("conditional_predictor", False),
         nmse_threshold_rec=config["nmse_threshold_rec"],
         nmse_threshold_perf=config["nmse_threshold_perf"],
+        whitening=config.get("whitening", False),
     )
 
     # Download and load checkpoint
@@ -233,6 +234,7 @@ def load_lvae_encoder(
         latent_dim=lvae_config.latent_dim,
         design_shape=lvae_config.design_shape,
         resize_dimensions=lvae_config.resize_dimensions,
+        whitening=lvae_config.whitening,
     )
     raw_encoder.load_state_dict(ckpt["encoder"])
 
@@ -325,14 +327,14 @@ def load_lvae_encoder_decoder(
         decoder_lipschitz_scale=config.get("decoder_lipschitz_scale", 1.0),
         predictor_lipschitz_scale=config.get("predictor_lipschitz_scale", 1.0),
         predictor_hidden_dims=tuple(config.get("predictor_hidden_dims", (256, 128))),
-
         conditional_predictor=config.get("conditional_predictor", False),
         nmse_threshold_rec=config["nmse_threshold_rec"],
         nmse_threshold_perf=config["nmse_threshold_perf"],
+        whitening=config.get("whitening", False),
     )
 
     # Reconstruct encoder — moved to target device for fast latent encoding
-    raw_encoder = Encoder2D(latent_dim, design_shape_, resize_dimensions)
+    raw_encoder = Encoder2D(latent_dim, design_shape_, resize_dimensions, whitening=lvae_config.whitening)
     raw_encoder.load_state_dict(ckpt["encoder"])
 
     if "pruning_mask" in ckpt and "pruning_frozen_z" in ckpt:
@@ -433,14 +435,14 @@ def load_full_lvae(
         decoder_lipschitz_scale=config.get("decoder_lipschitz_scale", 1.0),
         predictor_lipschitz_scale=config.get("predictor_lipschitz_scale", 1.0),
         predictor_hidden_dims=tuple(config.get("predictor_hidden_dims", (256, 128))),
-
         conditional_predictor=config.get("conditional_predictor", False),
         nmse_threshold_rec=config["nmse_threshold_rec"],
         nmse_threshold_perf=config["nmse_threshold_perf"],
+        whitening=config.get("whitening", False),
     )
 
     # Reconstruct models
-    raw_encoder = Encoder2D(latent_dim, design_shape_, resize_dimensions)
+    raw_encoder = Encoder2D(latent_dim, design_shape_, resize_dimensions, whitening=config.get("whitening", False))
     raw_encoder.load_state_dict(ckpt["encoder"])
 
     # Wrap with pruning mask if available in checkpoint

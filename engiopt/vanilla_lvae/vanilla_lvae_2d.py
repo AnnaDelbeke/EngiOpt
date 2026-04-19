@@ -86,6 +86,9 @@ class Args:
     # Architecture
     resize_dimensions: tuple[int, int] = (100, 100)
     """Dimensions to resize input images to before encoding/decoding."""
+    whitening: bool = False
+    """Apply PCA-rotation whitening after the encoder to decorrelate latent dimensions
+    by construction. Preserves per-dimension variance for volume regularization."""
     decoder_lipschitz_scale: float = 1.0
     """Lipschitz bound for spectrally normalized decoder. Controls output scaling."""
 
@@ -157,7 +160,7 @@ if __name__ == "__main__":
         device = th.device("cpu")
 
     # Build encoder and decoder
-    enc = Encoder2D(args.latent_dim, design_shape, args.resize_dimensions)
+    enc = Encoder2D(args.latent_dim, design_shape, args.resize_dimensions, whitening=args.whitening)
     dec = TrueSNDecoder2D(args.latent_dim, design_shape, lipschitz_scale=args.decoder_lipschitz_scale)
 
     # Weight schedule (ramps volume weight if warmup_epochs > 0, otherwise constant)
