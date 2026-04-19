@@ -109,6 +109,9 @@ class Args:
     """Whether to condition the decoder on scalar + image conditions for multi-modality measurement."""
     cond_embed_dim: int = 64
     """Dimensionality of image condition embedding (only used when image conditions exist)."""
+    encoder_ortho_weight: float = 0.0
+    """Weight for orthogonal regularization on the encoder's final layer. Penalizes
+    ||W^T W - I||_F to encourage decorrelated latent dimensions. 0 = disabled."""
     decoder_lipschitz_scale: float = 1.0
     """Lipschitz bound for spectrally normalized decoder. Controls output scaling."""
     predictor_lipschitz_ratio: float = 1.0
@@ -248,6 +251,8 @@ if __name__ == "__main__":
     print(f"Pruning threshold: {args.pruning_threshold}")
     if args.pruning_strategy == "lognorm":
         print(f"Alpha (lognorm): {args.alpha}")
+    if args.encoder_ortho_weight > 0:
+        print(f"Encoder ortho reg: weight={args.encoder_ortho_weight}")
     print(f"{'=' * 60}\n")
 
     # Log computed predictor_lipschitz_scale to wandb for model reconstruction
@@ -390,6 +395,15 @@ if __name__ == "__main__":
             # Compute loss (scalar, constraint-dependent)
             batch_tuple = (x_batch, c_batch, p_batch, ic_batch) if ic_batch is not None else (x_batch, c_batch, p_batch)
             loss = plvae.loss(batch_tuple)
+
+            # Orthogonal regularization on encoder final layer: ||W^T W - I||_F
+            # Encourages decorrelated latent dims by making encoder filters orthogonal
+            if args.encoder_ortho_weight > 0:
+                W = enc.to_latent.weight.flatten(1)  # (latent_dim, 512*7*7)
+                WtW = W @ W.T  # (latent_dim, latent_dim)
+                ortho_loss = th.linalg.norm(WtW - th.eye(W.size(0), device=W.device)) / W.size(0)
+                loss = loss + args.encoder_ortho_weight * ortho_loss
+
             loss.backward()
             plvae.optim.step()
 
@@ -424,6 +438,8 @@ if __name__ == "__main__":
                     "active_dims": plvae.dim,
                     "epoch": epoch,
                 }
+                if args.encoder_ortho_weight > 0:
+                    log_dict["ortho_loss"] = ortho_loss.item()
                 wandb.log(log_dict)
 
                 print(
