@@ -113,8 +113,8 @@ class Args:
     """Lipschitz bound for spectrally normalized decoder. Controls output scaling."""
     predictor_lipschitz_ratio: float = 1.0
     """Ratio multiplier for auto-scaled predictor Lipschitz bound. Effective bound is
-    ratio * L_dec * sqrt(n_perf / design_dim), which equalizes gradient pressure between
-    reconstruction and performance losses regardless of problem dimensionality."""
+    ratio * L_dec * sqrt(design_dim / n_perf), which strengthens the predictor
+    proportionally to the dimensionality gap so it can shape the latent space."""
     perf_scaler: Literal["robust", "quantile"] = "robust"
     """Scaler for performance values. 'robust' preserves cardinal structure (RobustScaler);
     'quantile' maps to N(0,1) via rank transform (QuantileTransformer), making Lipschitz
@@ -214,11 +214,12 @@ if __name__ == "__main__":
     n_perf = len(obj_keys)
 
     # Build MLP predictor (input: perf_dim latent dims + condition embedding)
-    # Auto-scale predictor Lipschitz bound to equalize gradient pressure with decoder:
-    #   L_pred = ratio * L_dec * sqrt(n_perf / design_dim)
-    # This compensates for the 1/N averaging in MSE over design_dim pixels vs n_perf scalars.
+    # Auto-scale predictor Lipschitz bound to strengthen predictor proportionally to
+    # the dimensionality gap:  L_pred = ratio * L_dec * sqrt(design_dim / n_perf)
+    # MSE over design_dim pixels dilutes decoder gradients; this compensates so the
+    # predictor has enough capacity to shape the latent space for performance.
     design_dim = math.prod(design_shape)
-    predictor_lipschitz_scale = args.predictor_lipschitz_ratio * args.decoder_lipschitz_scale * math.sqrt(n_perf / design_dim)
+    predictor_lipschitz_scale = args.predictor_lipschitz_ratio * args.decoder_lipschitz_scale * math.sqrt(design_dim / n_perf)
 
     predictor_input_dim = perf_dim + cond_dim_for_predictor
     predictor = SNMLPPredictor(
