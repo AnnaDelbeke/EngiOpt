@@ -325,6 +325,10 @@ if __name__ == "__main__":
                         }
                     )
 
+        # Trigger pruning check BEFORE validation so _vol_active reflects
+        # training-time constraint satisfaction, not validation batch state
+        lvae.epoch_report(epoch=epoch, callbacks=[], batch=None, loss=loss, pbar=None)
+
         # ---- Validation ----
         with th.no_grad():
             lvae.eval()
@@ -341,9 +345,7 @@ if __name__ == "__main__":
             val_rec /= n
             val_vol /= n
             val_nmse /= n
-
-        # Trigger pruning check at end of epoch
-        lvae.epoch_report(epoch=epoch, callbacks=[], batch=None, loss=loss, pbar=None)
+            lvae.train()
 
         if args.track:
             val_log_dict = {
