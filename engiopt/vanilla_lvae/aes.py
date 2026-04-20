@@ -548,6 +548,7 @@ class ConstrainedLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         self._current_rec_loss: float = 0.0
         self._current_vol_loss: float = 0.0
         self._vol_active: bool = False
+        self._vol_active_ema: float = 0.0  # EMA of constraint satisfaction for pruning gate
 
     @property
     def nmse(self) -> float:
@@ -620,19 +621,22 @@ class ConstrainedLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         # then add volume while keeping rec floor to prevent overshoot.
         if nmse > self.nmse_threshold:
             self._vol_active = False
+            self._vol_active_ema = 0.9 * self._vol_active_ema
             return rec_loss
         # Constraint satisfied - optimize volume with rec floor
         self._vol_active = True
+        self._vol_active_ema = 0.9 * self._vol_active_ema + 0.1
         return vol_loss + rec_loss
 
     @torch.no_grad()
     def _prune_step(self, epoch: int) -> None:
-        """Only prune when the reconstruction constraint is satisfied.
+        """Only prune when the reconstruction constraint is consistently satisfied.
 
-        Pruning reduces model capacity, so doing it while reconstruction
-        is still violated would make things worse.
+        Uses an EMA of per-batch constraint satisfaction (threshold 0.5) to
+        avoid blocking pruning due to single noisy batches, while still
+        preventing pruning when constraints are genuinely violated.
         """
-        if self._vol_active:
+        if self._vol_active_ema > 0.5:
             super()._prune_step(epoch)
 
 
@@ -835,6 +839,7 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         self._current_perf_loss: float = 0.0
         self._current_vol_loss: float = 0.0
         self._vol_active: bool = False
+        self._vol_active_ema: float = 0.0  # EMA of constraint satisfaction for pruning gate
 
     @property
     def nmse_rec(self) -> float:
@@ -988,19 +993,22 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         perf_violated = self._perf_enabled and nmse_perf > self.nmse_threshold_perf
         if rec_violated or perf_violated:
             self._vol_active = False
+            self._vol_active_ema = 0.9 * self._vol_active_ema
             return rec_loss + perf_loss
         # All active constraints satisfied - optimize volume with rec+perf floor
         self._vol_active = True
+        self._vol_active_ema = 0.9 * self._vol_active_ema + 0.1
         return vol_loss + rec_loss + perf_loss
 
     @torch.no_grad()
     def _prune_step(self, epoch: int) -> None:
-        """Only prune when both rec and perf constraints are satisfied.
+        """Only prune when constraints are consistently satisfied.
 
-        Pruning reduces model capacity, so doing it while constraints
-        are still violated would make things worse.
+        Uses an EMA of per-batch constraint satisfaction (threshold 0.5) to
+        avoid blocking pruning due to single noisy batches, while still
+        preventing pruning when constraints are genuinely violated.
         """
-        if self._vol_active:
+        if self._vol_active_ema > 0.5:
             super()._prune_step(epoch)
 
 
