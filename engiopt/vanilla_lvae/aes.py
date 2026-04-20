@@ -548,7 +548,7 @@ class ConstrainedLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         self._current_rec_loss: float = 0.0
         self._current_vol_loss: float = 0.0
         self._vol_active: bool = False
-        self._vol_active_ema: float = 0.0  # EMA of constraint satisfaction for pruning gate
+        self._nmse_ema: float = 1.0  # EMA of NMSE for smoothed pruning gate
 
     @property
     def nmse(self) -> float:
@@ -616,27 +616,26 @@ class ConstrainedLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         self._current_nmse = nmse.item()
         self._current_rec_loss = rec_loss.item()
         self._current_vol_loss = vol_loss.item()
+        self._nmse_ema = 0.9 * self._nmse_ema + 0.1 * nmse.item()
 
         # Constraint logic: optimize rec until NMSE is satisfied,
         # then add volume while keeping rec floor to prevent overshoot.
         if nmse > self.nmse_threshold:
             self._vol_active = False
-            self._vol_active_ema = 0.9 * self._vol_active_ema
             return rec_loss
         # Constraint satisfied - optimize volume with rec floor
         self._vol_active = True
-        self._vol_active_ema = 0.9 * self._vol_active_ema + 0.1
         return vol_loss + rec_loss
 
     @torch.no_grad()
     def _prune_step(self, epoch: int) -> None:
-        """Only prune when the reconstruction constraint is consistently satisfied.
+        """Only prune when the smoothed NMSE is below the constraint threshold.
 
-        Uses an EMA of per-batch constraint satisfaction (threshold 0.5) to
-        avoid blocking pruning due to single noisy batches, while still
-        preventing pruning when constraints are genuinely violated.
+        Uses an EMA of the raw NMSE (momentum 0.9) rather than per-batch
+        thresholding. This prevents both premature pruning from lucky low
+        batches and blocked pruning from unlucky high batches.
         """
-        if self._vol_active_ema > 0.5:
+        if self._nmse_ema <= self.nmse_threshold:
             super()._prune_step(epoch)
 
 
@@ -839,7 +838,8 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         self._current_perf_loss: float = 0.0
         self._current_vol_loss: float = 0.0
         self._vol_active: bool = False
-        self._vol_active_ema: float = 0.0  # EMA of constraint satisfaction for pruning gate
+        self._nmse_rec_ema: float = 1.0  # EMA of rec NMSE for smoothed pruning gate
+        self._nmse_perf_ema: float = 1.0  # EMA of perf NMSE for smoothed pruning gate
 
     @property
     def nmse_rec(self) -> float:
@@ -977,12 +977,15 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         nmse_rec = rec_loss / self._data_var
         nmse_perf = perf_loss / self._perf_var if self._perf_enabled else torch.tensor(0.0)
 
-        # Store for logging
+        # Store for logging and update NMSE EMAs
         self._current_nmse_rec = nmse_rec.item()
         self._current_nmse_perf = nmse_perf.item()
         self._current_rec_loss = rec_loss.item()
         self._current_perf_loss = perf_loss.item()
         self._current_vol_loss = vol_loss.item()
+        self._nmse_rec_ema = 0.9 * self._nmse_rec_ema + 0.1 * nmse_rec.item()
+        if self._perf_enabled:
+            self._nmse_perf_ema = 0.9 * self._nmse_perf_ema + 0.1 * nmse_perf.item()
 
         # Joint constraint logic: optimize rec+perf together until both
         # are satisfied, then add volume optimization.
@@ -993,22 +996,22 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         perf_violated = self._perf_enabled and nmse_perf > self.nmse_threshold_perf
         if rec_violated or perf_violated:
             self._vol_active = False
-            self._vol_active_ema = 0.9 * self._vol_active_ema
             return rec_loss + perf_loss
         # All active constraints satisfied - optimize volume with rec+perf floor
         self._vol_active = True
-        self._vol_active_ema = 0.9 * self._vol_active_ema + 0.1
         return vol_loss + rec_loss + perf_loss
 
     @torch.no_grad()
     def _prune_step(self, epoch: int) -> None:
-        """Only prune when constraints are consistently satisfied.
+        """Only prune when smoothed NMSEs are below constraint thresholds.
 
-        Uses an EMA of per-batch constraint satisfaction (threshold 0.5) to
-        avoid blocking pruning due to single noisy batches, while still
-        preventing pruning when constraints are genuinely violated.
+        Uses EMAs of raw NMSE values (momentum 0.9) rather than per-batch
+        thresholding. This prevents both premature pruning from lucky low
+        batches and blocked pruning from unlucky high batches.
         """
-        if self._vol_active_ema > 0.5:
+        rec_ok = self._nmse_rec_ema <= self.nmse_threshold_rec
+        perf_ok = not self._perf_enabled or self._nmse_perf_ema <= self.nmse_threshold_perf
+        if rec_ok and perf_ok:
             super()._prune_step(epoch)
 
 
