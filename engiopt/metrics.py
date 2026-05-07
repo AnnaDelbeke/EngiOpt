@@ -56,7 +56,7 @@ def _scalar_obj(obj_values: Any, weights: npt.NDArray | None = None) -> float:
     if arr.size == 1:
         return float(arr.flat[0])
     if weights is not None:
-        return float(np.dot(weights[:len(arr)], arr))
+        return float(np.dot(weights[: len(arr)], arr))
     return float(arr.flat[0])
 
 
@@ -159,6 +159,62 @@ def compute_median_sigma(x: np.ndarray, y: np.ndarray | None = None) -> float:
     return max(sigma, 1e-6)
 
 
+def compute_prdc(
+    real_features: np.ndarray,
+    fake_features: np.ndarray,
+    nearest_k: int = 5,
+) -> dict[str, float]:
+    """Compute precision, recall, density, and coverage between two sample sets.
+
+    Implements the four metrics from Naeem et al. 2020,
+    "Reliable Fidelity and Diversity Metrics for Generative Models" (ICML).
+    All four live in [0, 1]; higher = better.
+
+    - **precision**: fraction of fake samples that fall inside any real-sample's
+      k-NN ball. A fidelity score: are the generations plausible?
+    - **recall**: fraction of real samples that fall inside any fake-sample's
+      k-NN ball. A diversity score: does the generator cover the data manifold?
+    - **density**: smoothed precision; counts how many real-sample balls each
+      fake sample lies in, divided by k. Robust to real outliers that would
+      otherwise inflate precision.
+    - **coverage**: fraction of real samples whose own k-NN ball contains at
+      least one fake sample. A robust alternative to recall when fake samples
+      are noisy outliers.
+
+    Args:
+        real_features: shape (n_real, d). Reference samples.
+        fake_features: shape (n_fake, d). Generated samples.
+        nearest_k:     k for the k-NN ball radius. Clamped to ``min(n_real, n_fake) - 1``.
+
+    Returns:
+        dict with keys ``"precision"``, ``"recall"``, ``"density"``, ``"coverage"``.
+    """
+    real = real_features.reshape(real_features.shape[0], -1)
+    fake = fake_features.reshape(fake_features.shape[0], -1)
+    n_real = len(real)
+    n_fake = len(fake)
+    if n_real < 2 or n_fake < 2:  # noqa: PLR2004
+        return {"precision": float("nan"), "recall": float("nan"), "density": float("nan"), "coverage": float("nan")}
+    k = max(1, min(nearest_k, n_real - 1, n_fake - 1))
+
+    # k-th NN distance for each real (and each fake) sample. Self-distance
+    # sits at index 0 of the partition, so index k gives the k-th non-self
+    # neighbour.
+    real_radii = np.partition(cdist(real, real, "euclidean"), k, axis=1)[:, k]
+    fake_radii = np.partition(cdist(fake, fake, "euclidean"), k, axis=1)[:, k]
+    d_rf = cdist(real, fake, "euclidean")  # (n_real, n_fake)
+
+    inside_real = d_rf <= real_radii[:, None]  # (n_real, n_fake)
+    inside_fake = d_rf <= fake_radii[None, :]
+
+    precision = float(inside_real.any(axis=0).mean())
+    recall = float(inside_fake.any(axis=1).mean())
+    density = float(inside_real.sum(axis=0).mean()) / k
+    coverage = float((d_rf.min(axis=1) <= real_radii).mean())
+
+    return {"precision": precision, "recall": recall, "density": density, "coverage": coverage}
+
+
 def conditional_mmd(
     x: np.ndarray,
     y: np.ndarray,
@@ -236,9 +292,7 @@ def conditional_mmd(
     return result
 
 
-def optimality_gap(
-    opt_history: list[OptiStep], baseline: float, weights: npt.NDArray | None = None
-) -> list[float]:
+def optimality_gap(opt_history: list[OptiStep], baseline: float, weights: npt.NDArray | None = None) -> list[float]:
     """Compute the optimality gap of an optimization history.
 
     Args:
@@ -319,12 +373,13 @@ def simulate_failure_ratio(  # noqa: C901
     return failure_count / len(gen_designs)  # Return the failure ratio
 
 
-def metrics(  # noqa: PLR0915
+def metrics(  # noqa: C901, PLR0913, PLR0915
     problem: Problem,
     gen_designs: npt.NDArray,
     dataset_designs: npt.NDArray,
     sampled_conditions: Dataset | None = None,
     sigma: float | None = None,
+    skip_optimization: bool = False,  # noqa: FBT001, FBT002
 ) -> dict[str, Any]:
     """Compute various metrics for evaluating generative model designs.
 
@@ -335,28 +390,22 @@ def metrics(  # noqa: PLR0915
         sampled_conditions (Dataset): Dataset of sampled conditions for optimization. If None, no conditions are used.
         sigma: Bandwidth parameter for the Gaussian kernel (in mmd and dpp calculation).
             If None, uses median heuristic on the reference (dataset) designs.
+        skip_optimization: If True, skip the expensive per-sample
+            ``problem.optimize()`` / ``problem.simulate()`` calls and return only
+            the cheap distribution metrics (mmd, dpp, viol, PRDC). Use when
+            refreshing distribution metrics on previously evaluated runs.
 
     Returns:
-        dict[str, Any]: A dictionary containing the computed metrics:
-            - "iog": Average Initial Optimality Gap (float).
-            - "cog": Average Cumulative Optimality Gap (float).
-            - "fog": Average Final Optimality Gap (float).
-            - "iog_median": Median Initial Optimality Gap (float).
-            - "cog_median": Median Cumulative Optimality Gap (float).
-            - "fog_median": Median Final Optimality Gap (float).
-            - "iog_iqr": IQR of Initial Optimality Gap (float).
-            - "cog_iqr": IQR of Cumulative Optimality Gap (float).
-            - "fog_iqr": IQR of Final Optimality Gap (float).
-            - "iog_var": Variance of Initial Optimality Gap (float).
-            - "cog_var": Variance of Cumulative Optimality Gap (float).
-            - "fog_var": Variance of Final Optimality Gap (float).
-            - "iog_list": Per-sample Initial Optimality Gaps (list[float]).
-            - "cog_list": Per-sample Cumulative Optimality Gaps (list[float]).
-            - "fog_list": Per-sample Final Optimality Gaps (list[float]).
-            - "viol_list": Per-sample constraint violations (list[bool]).
+        dict[str, Any]: A dictionary containing the computed metrics. When
+        ``skip_optimization`` is False, all keys below are present. When True,
+        the IOG/COG/FOG keys are omitted; the cheap keys remain.
+
+            - "iog"/"cog"/"fog" plus "_median"/"_iqr"/"_var"/"_list" variants.
+            - "viol_list", "viol": Per-sample constraint violations.
             - "mmd": Maximum Mean Discrepancy (float).
             - "dpp": Determinantal Point Process diversity (float).
             - "mmd_sigma": The actual sigma used for MMD/DPP (float).
+            - "precision"/"recall"/"density"/"coverage": PRDC metrics.
     """
     n_samples = len(gen_designs)
 
@@ -385,19 +434,20 @@ def metrics(  # noqa: PLR0915
             obj_weights[0] = w
             obj_weights[1] = 1.0 - w
 
-        problem.reset(seed=42)  # Reset the problem state before optimization/simulation
-        _, opt_history = problem.optimize(unflattened_design, config=conditions)
+        if not skip_optimization:
+            problem.reset(seed=42)  # Reset the problem state before optimization/simulation
+            _, opt_history = problem.optimize(unflattened_design, config=conditions)
 
-        problem.reset(seed=42)  # Reset again before simulating the reference optimum
-        reference_optimum = _scalar_obj(problem.simulate(dataset_designs[i], config=conditions), obj_weights)
-        opt_history_gaps = optimality_gap(opt_history, reference_optimum, obj_weights)
+            problem.reset(seed=42)  # Reset again before simulating the reference optimum
+            reference_optimum = _scalar_obj(problem.simulate(dataset_designs[i], config=conditions), obj_weights)
+            opt_history_gaps = optimality_gap(opt_history, reference_optimum, obj_weights)
 
-        problem.reset(seed=42)  # Reset again before simulating the optimized design
-        iog_list.append(
-            _scalar_obj(problem.simulate(unflattened_design, config=conditions), obj_weights) - reference_optimum
-        )
-        cog_list.append(np.sum(opt_history_gaps))
-        fog_list.append(opt_history_gaps[-1])
+            problem.reset(seed=42)  # Reset again before simulating the optimized design
+            iog_list.append(
+                _scalar_obj(problem.simulate(unflattened_design, config=conditions), obj_weights) - reference_optimum
+            )
+            cog_list.append(np.sum(opt_history_gaps))
+            fog_list.append(opt_history_gaps[-1])
 
         # Check if conditions dict has 'volfrac' or 'volume' key and compare with design mean
         if conditions:
@@ -407,27 +457,7 @@ def metrics(  # noqa: PLR0915
                 viol = np.abs(np.mean(unflattened_design) - target_vol) >= tol
                 viol_list.append(viol)
 
-    # Compute aggregated statistics for IOG, COG, FOG
-    iog_arr = np.array(iog_list)
-    cog_arr = np.array(cog_list)
-    fog_arr = np.array(fog_list)
-
-    average_iog: float = float(np.mean(iog_arr))
-    average_cog: float = float(np.mean(cog_arr))
-    average_fog: float = float(np.mean(fog_arr))
-    average_viol: float = float(np.mean(viol_list))
-
-    median_iog: float = float(np.median(iog_arr))
-    median_cog: float = float(np.median(cog_arr))
-    median_fog: float = float(np.median(fog_arr))
-
-    iqr_iog: float = float(np.subtract(*np.percentile(iog_arr, [75, 25])))
-    iqr_cog: float = float(np.subtract(*np.percentile(cog_arr, [75, 25])))
-    iqr_fog: float = float(np.subtract(*np.percentile(fog_arr, [75, 25])))
-
-    var_iog: float = float(np.var(iog_arr))
-    var_cog: float = float(np.var(cog_arr))
-    var_fog: float = float(np.var(fog_arr))
+    average_viol: float = float(np.mean(viol_list)) if viol_list else float("nan")
 
     # Compute the Maximum Mean Discrepancy (MMD) between generated and dataset designs
     # We compute the MMD on the flattened designs
@@ -450,27 +480,44 @@ def metrics(  # noqa: PLR0915
     # Use the same reference sigma as MMD so DPP is comparable across models
     dpp_value: float = dpp_diversity(gen_designs, sigma=sigma)
 
+    # PRDC on flattened designs (pixel space): fidelity/diversity decomposition.
+    flat_gen = gen_designs.reshape(gen_designs.shape[0], -1)
+    prdc = compute_prdc(flattened_ds_designs_array, flat_gen)
+
     result: dict[str, Any] = {
-        "iog": average_iog,
-        "cog": average_cog,
-        "fog": average_fog,
-        "iog_median": median_iog,
-        "cog_median": median_cog,
-        "fog_median": median_fog,
-        "iog_iqr": iqr_iog,
-        "cog_iqr": iqr_cog,
-        "fog_iqr": iqr_fog,
-        "iog_var": var_iog,
-        "cog_var": var_cog,
-        "fog_var": var_fog,
-        "iog_list": iog_list,
-        "cog_list": cog_list,
-        "fog_list": fog_list,
         "viol_list": viol_list,
         "mmd": mmd_value,
         "dpp": dpp_value,
         "mmd_sigma": sigma,
         "viol": average_viol,
+        "precision": prdc["precision"],
+        "recall": prdc["recall"],
+        "density": prdc["density"],
+        "coverage": prdc["coverage"],
     }
+
+    if not skip_optimization:
+        iog_arr = np.array(iog_list)
+        cog_arr = np.array(cog_list)
+        fog_arr = np.array(fog_list)
+        result.update(
+            {
+                "iog": float(np.mean(iog_arr)),
+                "cog": float(np.mean(cog_arr)),
+                "fog": float(np.mean(fog_arr)),
+                "iog_median": float(np.median(iog_arr)),
+                "cog_median": float(np.median(cog_arr)),
+                "fog_median": float(np.median(fog_arr)),
+                "iog_iqr": float(np.subtract(*np.percentile(iog_arr, [75, 25]))),
+                "cog_iqr": float(np.subtract(*np.percentile(cog_arr, [75, 25]))),
+                "fog_iqr": float(np.subtract(*np.percentile(fog_arr, [75, 25]))),
+                "iog_var": float(np.var(iog_arr)),
+                "cog_var": float(np.var(cog_arr)),
+                "fog_var": float(np.var(fog_arr)),
+                "iog_list": iog_list,
+                "cog_list": cog_list,
+                "fog_list": fog_list,
+            }
+        )
 
     return result

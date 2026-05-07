@@ -238,6 +238,14 @@ def compute_lvae_metrics(  # noqa: PLR0913, PLR0915
     metrics_dict[f"lv_sigma{suffix}"] = lv_sigma
     metrics_dict[f"lvae_n_active_dims{suffix}"] = n_active
 
+    # PRDC on LV active dims: precision/recall/density/coverage decompose
+    # fidelity vs diversity in the same space LV-MMD operates in.
+    lv_prdc = metrics.compute_prdc(z_data, z_gen)
+    metrics_dict[f"lv_precision{suffix}"] = lv_prdc["precision"]
+    metrics_dict[f"lv_recall{suffix}"] = lv_prdc["recall"]
+    metrics_dict[f"lv_density{suffix}"] = lv_prdc["density"]
+    metrics_dict[f"lv_coverage{suffix}"] = lv_prdc["coverage"]
+
     # Build reference stats from full training set (not just sampled test designs)
     train_designs_np = np.array(problem.dataset["train"]["optimal_design"])
     z_train = encode_designs(encoder, train_designs_np, device)[:, active]
@@ -366,8 +374,9 @@ def run_lvae_loop(  # noqa: PLR0913
     metrics_dict["lvae_condition_filter_value"] = args.lvae_condition_filter_value
 
     # Log base metrics to WandB immediately before LVAE loop (timeout-safe).
-    # Skip in lv_only mode to avoid overwriting existing eval/<key> values with None.
-    if args.log_to_wandb and run is not None and not args.lv_only:
+    # log_base_metrics_to_wandb skips keys whose value is None, so an lv_only rerun
+    # does not overwrite previously logged optimization-derived metrics.
+    if args.log_to_wandb and run is not None:
         log_base_metrics_to_wandb(run, metrics_dict)
 
     for rec_thresh, perf_thresh in itertools.product(rec_thresholds, perf_thresholds):
@@ -416,15 +425,28 @@ _BASE_METRIC_KEYS = [
     "fog_var",
     "viol",
     "mmd_sigma",
+    "precision",
+    "recall",
+    "density",
+    "coverage",
 ]
 
 
 def log_base_metrics_to_wandb(run: Any, metrics_dict: dict[str, Any]) -> None:
-    """Log simulation-level metrics (IOG/COG/FOG/MMD/DPP) to WandB summary."""
+    """Log simulation-level metrics (IOG/COG/FOG/MMD/DPP/PRDC) to WandB summary.
+
+    Skips keys whose value is missing or None so that an ``lv_only`` rerun does
+    not overwrite previously logged optimization-derived metrics with None.
+    """
+    written = 0
     for key in _BASE_METRIC_KEYS:
-        run.summary[f"eval/{key}"] = metrics_dict.get(key)
+        val = metrics_dict.get(key)
+        if val is None:
+            continue
+        run.summary[f"eval/{key}"] = val
+        written += 1
     run.summary.update()
-    print("  Logged base metrics to WandB.")
+    print(f"  Logged {written} base metrics to WandB.")
 
 
 def log_lvae_combo_to_wandb(
@@ -445,6 +467,10 @@ def log_lvae_combo_to_wandb(
     run.summary[f"{prefix}/lv_dpp"] = metrics_dict.get(f"lv_dpp{suffix}")
     run.summary[f"{prefix}/lv_sigma"] = metrics_dict.get(f"lv_sigma{suffix}")
     run.summary[f"{prefix}/n_active_dims"] = metrics_dict.get(f"lvae_n_active_dims{suffix}")
+    run.summary[f"{prefix}/lv_precision"] = metrics_dict.get(f"lv_precision{suffix}")
+    run.summary[f"{prefix}/lv_recall"] = metrics_dict.get(f"lv_recall{suffix}")
+    run.summary[f"{prefix}/lv_density"] = metrics_dict.get(f"lv_density{suffix}")
+    run.summary[f"{prefix}/lv_coverage"] = metrics_dict.get(f"lv_coverage{suffix}")
     run.summary[f"{prefix}/lv_mahal_mean"] = metrics_dict.get(f"lv_mahal_mean{suffix}")
     run.summary[f"{prefix}/lv_plausibility_rate"] = metrics_dict.get(f"lv_plausibility_rate{suffix}")
     run.summary[f"{prefix}/lv_nq_hypervolume"] = metrics_dict.get(f"lv_nq_hypervolume{suffix}")
