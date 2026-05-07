@@ -106,7 +106,12 @@ if __name__ == "__main__":
         gen_designs_np = np.clip(gen_designs_np, 1e-3, 1.0)
 
         ### Shared: metrics, LVAE loop, save ###
-        metrics_dict = metrics.metrics(problem, gen_designs_np, sampled_designs_np, sampled_conditions, sigma=args.sigma)
+        if args.lv_only:
+            metrics_dict = {}
+        else:
+            metrics_dict = metrics.metrics(
+                problem, gen_designs_np, sampled_designs_np, sampled_conditions, sigma=args.sigma
+            )
         metrics_dict.update(
             {"seed": seed, "problem_id": args.problem_id, "model_id": "diffusion_2d_cond", "n_samples": args.n_samples}
         )

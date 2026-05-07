@@ -56,6 +56,11 @@ class BaseEvaluationArgs:
     compute_lv_suite: bool = False
     """Compute full LV metric suite (projection residual, dual gap). Requires decoder."""
 
+    # LV-only rerun: skip the expensive optimization-based base metrics.
+    lv_only: bool = False
+    """Skip the optimization-based base metrics (IOG/COG/FOG/MMD/DPP) and run only the LVAE loop.
+    Use to refresh LV metrics on previously evaluated runs without re-running expensive simulations."""
+
     # LVAE condition filter (for weight-isolated models)
     lvae_condition_filter_key: str | None = None
     """Condition column the LVAE was trained on (e.g. 'weight'). Also filters test conditions."""
@@ -360,8 +365,9 @@ def run_lvae_loop(  # noqa: PLR0913
     metrics_dict["lvae_condition_filter_key"] = args.lvae_condition_filter_key
     metrics_dict["lvae_condition_filter_value"] = args.lvae_condition_filter_value
 
-    # Log base metrics to WandB immediately before LVAE loop (timeout-safe)
-    if args.log_to_wandb and run is not None:
+    # Log base metrics to WandB immediately before LVAE loop (timeout-safe).
+    # Skip in lv_only mode to avoid overwriting existing eval/<key> values with None.
+    if args.log_to_wandb and run is not None and not args.lv_only:
         log_base_metrics_to_wandb(run, metrics_dict)
 
     for rec_thresh, perf_thresh in itertools.product(rec_thresholds, perf_thresholds):
