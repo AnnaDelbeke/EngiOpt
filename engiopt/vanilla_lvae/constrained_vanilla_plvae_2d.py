@@ -170,6 +170,7 @@ if __name__ == "__main__":
     random.seed(args.seed)
     th.backends.cudnn.deterministic = True
     th.backends.cudnn.benchmark = False
+    th.use_deterministic_algorithms(True, warn_only=True)
     g = th.Generator().manual_seed(args.seed)  # For DataLoader shuffling
 
     os.makedirs("images", exist_ok=True)
@@ -340,7 +341,11 @@ if __name__ == "__main__":
 
     # Scale performance values
     if args.perf_scaler == "quantile":
-        p_scaler = QuantileTransformer(output_distribution="normal", n_quantiles=min(len(p_train), 1000))
+        p_scaler = QuantileTransformer(
+            output_distribution="normal",
+            n_quantiles=min(len(p_train), 1000),
+            random_state=args.seed,
+        )
     else:
         p_scaler = RobustScaler()
     p_train_scaled = th.from_numpy(p_scaler.fit_transform(p_train.numpy())).to(p_train.dtype)

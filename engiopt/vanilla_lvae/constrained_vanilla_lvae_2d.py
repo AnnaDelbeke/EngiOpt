@@ -127,6 +127,7 @@ if __name__ == "__main__":
     random.seed(args.seed)
     th.backends.cudnn.deterministic = True
     th.backends.cudnn.benchmark = False
+    th.use_deterministic_algorithms(True, warn_only=True)
     g = th.Generator().manual_seed(args.seed)  # For DataLoader shuffling
 
     os.makedirs("images", exist_ok=True)
