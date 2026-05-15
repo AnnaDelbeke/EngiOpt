@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=eval_ddm_lvae_v11
+#SBATCH --job-name=eval_ddm_lvae_v13
 #SBATCH --time=4:00:00
 #SBATCH --cpus-per-task=4
 #SBATCH --mem-per-cpu=8G
@@ -14,7 +14,7 @@ mkdir -p logs
 source .venv/bin/activate
 export HF_DATASETS_OFFLINE=1
 python -u -m engiopt.ddm.ddm_lvae.evaluate_ddm_lvae \
-    --checkpoint results/ddm_lvae/ddm_lvae_v11_best.pth \
+    --checkpoint results/ddm_lvae/ddm_lvae_v13_best.pth \
     --n_passes 10 \
     --seed 0 \
-    --T 980
+    --T 1000
