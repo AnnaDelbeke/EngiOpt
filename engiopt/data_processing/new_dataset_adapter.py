@@ -4,11 +4,11 @@ of dicts that match the EngiBench Wings3D item format consumed by train_lvae.py
 and train_ddm.py.
 
 Expected item keys (same as Wings3D):
-    case_num, slice_num, coords [9,192,2], initial, final,
+    case_num, slice_num, coords [15,192,2], initial, final,
     mach, reynolds, cl_target, area_case_ratio,
     alpha, area_initial (placeholder -9999), cd_val, cl_val,
-    cl_con, area_con, coef_pressure [9,192],
-    velocity_x [9,192], velocity_y [9,192], velocity_z [9,192],
+    cl_con, area_con, coef_pressure [15,192],
+    velocity_x [15,192], velocity_y [15,192], velocity_z [15,192],
     transforms [9],   ← span-wise eta positions
     te_shifts [9],    ← trailing-edge y-offsets (computed from coords)
 
@@ -49,8 +49,13 @@ def _build_item(
     scalar_row: pd.Series,
     is_initial: bool,
     is_final: bool,
+    sub_slice_indices: list[int] | None = None,
 ) -> dict:
-    """Build a single Wings3D-compatible item dict from processed slice data."""
+    """Build a single Wings3D-compatible item dict from processed slice data.
+
+    sub_slice_indices: optional list of integer positions (0-based, after sorting
+    by eta root→tip) to select a non-uniform subset of spans.  None = use all.
+    """
     sub_slice_nums = df_slice_group["sub_slice_num"].unique()
     etas = df_slice_group.groupby("sub_slice_num")["eta"].first()
 
@@ -58,6 +63,11 @@ def _build_item(
     sort_idx = np.argsort(etas.values)
     sub_slice_nums_sorted = sub_slice_nums[sort_idx]
     etas_sorted = etas.values[sort_idx]
+
+    # Optionally select a non-uniform subset of spans
+    if sub_slice_indices is not None:
+        sub_slice_nums_sorted = sub_slice_nums_sorted[sub_slice_indices]
+        etas_sorted = etas_sorted[sub_slice_indices]
 
     n_slices = len(sub_slice_nums_sorted)
     n_pts = len(df_slice_group[df_slice_group["sub_slice_num"] == sub_slice_nums_sorted[0]])
@@ -70,13 +80,27 @@ def _build_item(
 
     for i, ssn in enumerate(sub_slice_nums_sorted):
         row_df = df_slice_group[df_slice_group["sub_slice_num"] == ssn]
-        coords[i, :, 0] = row_df["CoordinateX"].values
-        coords[i, :, 1] = row_df["CoordinateY"].values
-        coef_pressure[i] = row_df["CoefPressure"].values
-        velocity_x[i]    = row_df["VelocityX"].values
-        velocity_y[i]    = row_df["VelocityY"].values
-        velocity_z[i]    = row_df["VelocityZ"].values
-
+        
+        # Extract the raw coordinates
+        raw_x = row_df["CoordinateX"].values
+        raw_y = row_df["CoordinateY"].values
+        raw_cp = row_df["CoefPressure"].values
+        raw_vx = row_df["VelocityX"].values
+        raw_vy = row_df["VelocityY"].values
+        raw_vz = row_df["VelocityZ"].values
+        
+        # Create a normalized index array for the existing points
+        n_existing = len(raw_x)
+        old_indices = np.linspace(0, 1, n_existing)
+        new_indices = np.linspace(0, 1, n_pts)
+        
+        # Linearly resample every property to exactly n_pts (192)
+        coords[i, :, 0] = np.interp(new_indices, old_indices, raw_x)
+        coords[i, :, 1] = np.interp(new_indices, old_indices, raw_y)
+        coef_pressure[i] = np.interp(new_indices, old_indices, raw_cp)
+        velocity_x[i]    = np.interp(new_indices, old_indices, raw_vx)
+        velocity_y[i]    = np.interp(new_indices, old_indices, raw_vy)
+        velocity_z[i]    = np.interp(new_indices, old_indices, raw_vz)
     # te_shifts: trailing-edge y-offsets per span slice (first point = TE)
     te_shifts = coords[:, 0, 1].copy()  # [n_slices]
 
@@ -120,7 +144,7 @@ def _build_item(
     return {
         "case_num":        int(case_num),
         "slice_num":       int(slice_num),
-        "coords":          coords,                    # [9,192,2]
+        "coords":          coords,                    # [15,192,2]
         "initial":         int(is_initial),
         "final":           int(is_final),
         "mach":            float(scalar_row["case_mach"]),
@@ -135,10 +159,10 @@ def _build_item(
         "area_con":        float(scalar_row.get("vol_con", -9999.0)),
         "transforms":      etas_sorted.astype(np.float32),   # [9] span positions
         "te_shifts":       te_shifts.astype(np.float32),     # [9]
-        "coef_pressure":   coef_pressure,             # [9,192]
-        "velocity_x":      velocity_x,                # [9,192]
-        "velocity_y":      velocity_y,                # [9,192]
-        "velocity_z":      velocity_z,                # [9,192]
+        "coef_pressure":   coef_pressure,             # [15,192]
+        "velocity_x":      velocity_x,                # [15,192]
+        "velocity_y":      velocity_y,                # [15,192]
+        "velocity_z":      velocity_z,                # [15,192]
         "geo_params":      geo_params,                # [34] geometric scalars
     }
 
@@ -161,6 +185,7 @@ class NewWingsDataset:
         slices_pkl: str,
         scalars_pkl: str,
         seed: int = 0,
+        sub_slice_indices: list[int] | None = None,
     ):
         with open(slices_pkl, "rb") as f:
             self._df_slices: pd.DataFrame = pickle.load(f)
@@ -182,11 +207,13 @@ class NewWingsDataset:
             "val":   set(shuffled[n_train : n_train + n_val].tolist()),
             "test":  set(shuffled[n_train + n_val :].tolist()),
         }
+        self._sub_slice_indices = sub_slice_indices
 
     def __getitem__(self, split: str) -> "_SplitView":
         if split not in self._splits:
             raise KeyError(f"Unknown split '{split}'. Choose from {list(self._splits)}")
-        return _SplitView(self._df_slices, self._df_scalars, self._splits[split])
+        return _SplitView(self._df_slices, self._df_scalars, self._splits[split],
+                          self._sub_slice_indices)
 
 
 class _SplitView:
@@ -197,10 +224,12 @@ class _SplitView:
         df_slices: pd.DataFrame,
         df_scalars: pd.DataFrame,
         case_set: set,
+        sub_slice_indices: list[int] | None = None,
     ):
         self._df_slices  = df_slices[df_slices["case_num"].isin(case_set)]
         self._df_scalars = df_scalars
         self._case_set   = case_set
+        self._sub_slice_indices = sub_slice_indices
 
     def _valid_cases(self) -> set:
         """Return the subset of case_set that has converged cl_con."""
@@ -229,5 +258,6 @@ class _SplitView:
                 group = df_case[df_case["slice_num"] == slice_num]
                 scalar_row = _scalar_row(self._df_scalars, case_num, final=is_final)
                 yield _build_item(
-                    case_num, slice_num, group, scalar_row, is_initial, is_final
+                    case_num, slice_num, group, scalar_row, is_initial, is_final,
+                    sub_slice_indices=self._sub_slice_indices,
                 )

@@ -65,7 +65,8 @@ def compute_vendi(samples, gamma):
 
 
 def compute_metrics(generated, gt_airfoils, gen_aoas, gt_aoas,
-                    gen_pressures=None, gt_pressures=None):
+                    gen_pressures=None, gt_pressures=None,
+                    gen_w=None, gt_w=None):
     n_slices  = generated.shape[1]
     shape_mse = 0.0
     mmd_vals, vendi_gen_vals, vendi_gt_vals = [], [], []
@@ -90,6 +91,11 @@ def compute_metrics(generated, gt_airfoils, gen_aoas, gt_aoas,
     out = {"shape_mse": shape_mse, "aoa_mse": aoa_mse, "mmd": mmd, "vendi": vendi_norm}
     if gen_pressures is not None and gt_pressures is not None:
         out["pressure_mse"] = ((gen_pressures - gt_pressures) ** 2).mean().item()
+
+    # MMD in LVAE w-space (64-dim) — more meaningful than 384-dim coord space
+    if gen_w is not None and gt_w is not None:
+        out["mmd_w"] = float(np.mean([compute_mmd(gen_w, gt_w, g) for g in GAMMAS]))
+
     return out
 
 
@@ -105,18 +111,22 @@ def precompute_test(test_dataset, initial_by_case, bae_model, lvae_model,
       gt_coords    : [N, S, 2, 192]
       gt_aoas      : [N]
       gt_pressures : [N, S, 192]
+      gt_w         : [N, w_dim]   — LVAE w encoding of GT optimised wing
       w_inits_norm : [N, w_dim]   — normalised w_init for each test wing
       params_norm  : [N, c_dim]   — normalised flow params
       te_shifts    : list of [S] tensors
       etas         : list of [S] tensors (spanwise positions)
+      case_nums    : list of int
     """
     gt_coords_list  = []
     gt_aoas_list    = []
     gt_pressures_list = []
+    gt_w_list       = []
     w_inits_list    = []
     params_list     = []
     te_shifts_list  = []
     etas_list       = []
+    case_nums_list  = []
 
     bae_model.eval()
     lvae_model.encoder.eval()
@@ -157,6 +167,7 @@ def precompute_test(test_dataset, initial_by_case, bae_model, lvae_model,
 
             # w_init for this test wing
             case_num = int(item["case_num"])
+            case_nums_list.append(case_num)
             flow = [item["mach"], item["reynolds"], item["cl_target"], item["area_case_ratio"]]
             flow_np = np.array(flow, dtype=np.float32).reshape(1, -1)
             if lvae_params_scaler is not None:
@@ -187,6 +198,15 @@ def precompute_test(test_dataset, initial_by_case, bae_model, lvae_model,
             w_init_norm = (w_init - w_mean.squeeze(0)) / w_std.squeeze(0)
             w_inits_list.append(w_init_norm)
 
+            # Encode GT optimised wing to w-space for latent MMD
+            z_slices_gt = []
+            for s in range(S):
+                x_s = coords_c[s].permute(1, 0).unsqueeze(0).to(device)
+                z_slices_gt.append(bae_model.encode(x_s, return_z=True, z_ae_mode=True).squeeze(0))
+            z_gt_wing = torch.stack(z_slices_gt, dim=0).unsqueeze(0)
+            w_gt = lvae_model.encoder(z_gt_wing, flow_lvae).squeeze(0).cpu()
+            gt_w_list.append(w_gt)
+
             flow_t = torch.tensor(flow, dtype=torch.float32)
             params_norm = scaler_params.transform(flow_t)
             params_list.append(params_norm)
@@ -195,10 +215,12 @@ def precompute_test(test_dataset, initial_by_case, bae_model, lvae_model,
         torch.stack(gt_coords_list),    # [N, S, 2, 192]
         torch.stack(gt_aoas_list),      # [N]
         torch.stack(gt_pressures_list), # [N, S, 192]
+        torch.stack(gt_w_list),         # [N, w_dim]
         torch.stack(w_inits_list),      # [N, w_dim]
         torch.stack(params_list),       # [N, c_dim]
         te_shifts_list,
         etas_list,
+        case_nums_list,
     )
 
 
@@ -274,7 +296,8 @@ def main():
     test_dataset    = [item for item in all_test if item["final"] == 1]
     print(f"Test set: {len(test_dataset)} wings")
 
-    gt_coords, gt_aoas, gt_pressures, w_inits, params_norm, te_shifts_list, etas_list = \
+    gt_coords, gt_aoas, gt_pressures, gt_w, w_inits, params_norm, \
+        te_shifts_list, etas_list, case_nums = \
         precompute_test(
             test_dataset, initial_by_case, bae_model, lvae_model,
             lvae_params_scaler, cfg.lvae_params_dim, w_mean, w_std,
@@ -288,9 +311,10 @@ def main():
     all_aoas       = []
     all_pressures  = []
     all_te_shifts  = []
+    all_w          = []
 
     for pass_i in range(args.n_passes):
-        coords_pass, aoas_pass, pres_pass, te_pass = ddm_w.generate(
+        coords_pass, aoas_pass, pres_pass, te_pass, w_pass = ddm_w.generate(
             w_init=w_inits.to(device),
             params=params_norm.to(device),
             device=device,
@@ -300,19 +324,19 @@ def main():
         all_aoas.append(aoas_pass)
         all_pressures.append(pres_pass)
         all_te_shifts.append(te_pass)
+        all_w.append(w_pass)
         print(f"  Pass {pass_i+1}/{args.n_passes} done.")
 
     gen_coords    = torch.stack(all_coords,    dim=0).mean(0)  # [N, S, 2, 192]
     gen_aoas      = torch.stack(all_aoas,      dim=0).mean(0)  # [N]
     gen_pressures = torch.stack(all_pressures, dim=0).mean(0)  # [N, S, 192]
     gen_te_shifts = torch.stack(all_te_shifts, dim=0).mean(0)  # [N, S]
-
-    # Both gen and GT coords are in BAE-centered space (TE at y=0).
-    # No te_shift re-application needed for either.
+    gen_w         = torch.stack(all_w,         dim=0).mean(0)  # [N, w_dim]
 
     metrics = compute_metrics(
         gen_coords, gt_coords, gen_aoas, gt_aoas,
         gen_pressures, gt_pressures,
+        gen_w=gen_w, gt_w=gt_w,
     )
 
     print("\n=== Evaluation Results ===")
@@ -327,6 +351,7 @@ def main():
     metrics["checkpoint"] = args.checkpoint
     metrics["n_passes"]   = args.n_passes
     metrics["n_test"]     = N
+    metrics["case_nums"]  = case_nums
 
     with open(base + ".json", "w") as f:
         json.dump(metrics, f, indent=2)

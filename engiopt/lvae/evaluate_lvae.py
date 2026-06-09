@@ -16,6 +16,7 @@ _SCALARS_PKL = "Wing_TL/data/processed/new_dataset_scalars.pkl"
 
 from engiopt.lvae.lvae import LAE_AoAInit
 from engiopt.lvae.train_lvae import Config, build_encoder, build_decoder, build_sampler, load_bae, ensure_perf_regressor_fitted
+from engiopt.lvae.unets import LAEEncoderJoint
 from engiopt.lvae import plotting as lvae_plotting
 
 # ── Evaluation settings ───────────────────────────────────────────────────────
@@ -116,6 +117,75 @@ def compute_perf_metrics(gen_perf: torch.Tensor, gt_perf: torch.Tensor):
     return {"perf_mse": perf_mse, "cd_mse": cd_mse, "cl_mse": cl_mse}
 
 
+# ── Latent-space and PCA metric helpers ──────────────────────────────────────
+
+def compute_latent_mmd(latents: np.ndarray) -> float:
+    """MMD between extracted latents [N, d] and a standard normal prior of the same shape."""
+    N, d = latents.shape
+    prior = np.random.default_rng(0).standard_normal((N, d)).astype(np.float32)
+    lat_t   = torch.tensor(latents, dtype=torch.float32)
+    prior_t = torch.tensor(prior,   dtype=torch.float32)
+    mmd_vals = [compute_mmd(lat_t, prior_t, g) for g in GAMMAS]
+    return float(np.mean(mmd_vals))
+
+
+def fit_pca_and_transform(train_coords: np.ndarray, test_coords: np.ndarray,
+                          n_components: int):
+    """
+    Fit PCA on flattened train coords, transform test coords.
+
+    train_coords: [N_train, ...] — any trailing dims, will be flattened
+    test_coords:  [N_test,  ...] — same trailing dims
+    Returns (pca, test_latents [N_test, n_components], train_latents [N_train, n_components])
+    """
+    from sklearn.decomposition import PCA
+    train_flat = train_coords.reshape(len(train_coords), -1)
+    test_flat  = test_coords.reshape(len(test_coords),  -1)
+    pca = PCA(n_components=n_components, random_state=0)
+    train_lat = pca.fit_transform(train_flat).astype(np.float32)
+    test_lat  = pca.transform(test_flat).astype(np.float32)
+    return pca, test_lat, train_lat
+
+
+def compute_pca_reconstruction_errors(test_coords: np.ndarray,
+                                      pca, n_components: int) -> np.ndarray:
+    """Per-sample coordinate-wise MSE after PCA roundtrip. Returns [N_test] array."""
+    test_flat  = test_coords.reshape(len(test_coords), -1)
+    test_lat   = pca.transform(test_flat)
+    test_recon = pca.inverse_transform(test_lat).reshape(test_flat.shape)
+    return ((test_flat - test_recon) ** 2).mean(axis=1)
+
+
+def plot_error_histogram_comparison(lvae_errors: np.ndarray, pca_errors: np.ndarray,
+                                    save_path: str, n_bins: int = 30):
+    """Side-by-side histograms of per-sample MSE: LVAE (left) vs PCA baseline (right),
+    each with their own x-axis scale, plus summary stats annotations."""
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+    for ax, errors, label, color in [
+        (axes[0], lvae_errors, "LVAE (v8)",      "steelblue"),
+        (axes[1], pca_errors,  "PCA (64 comps)", "darkorange"),
+    ]:
+        bins = np.linspace(0, np.percentile(errors, 99), n_bins + 1)
+        ax.hist(errors, bins=bins, color=color, alpha=0.85, edgecolor="white")
+        ax.axvline(errors.mean(),   color="black",  lw=1.5, linestyle="--",
+                   label=f"Mean: {errors.mean():.2e}")
+        ax.axvline(np.median(errors), color="dimgray", lw=1.5, linestyle=":",
+                   label=f"Median: {np.median(errors):.2e}")
+        ax.set_xlabel("Per-sample coordinate MSE")
+        ax.set_ylabel("Count of airfoils")
+        ax.set_title(label)
+        ax.legend(fontsize=8)
+
+    fig.suptitle("Reconstruction error distribution: LVAE vs PCA baseline", y=1.01)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Error histogram saved to {save_path}")
+
+
 # ── Batched generation helper ─────────────────────────────────────────────────
 
 def generate_batch(
@@ -178,16 +248,19 @@ def reconstruct_batch(
     z_opts_batch,    # [B, 9, latent_ch, L] — BAE-encoded optimized slices
     params_batch,    # [B, c_dim] scaled
     device,
-    te_shifts_batch=None,  # [B, 9] ground-truth TE y-offsets for forced alignment
+    te_shifts_batch=None,   # [B, 9] ground-truth TE y-offsets for forced alignment
+    pressure_batch=None,    # [B, 9, 192] ground-truth pressure — required for joint encoder
 ):
     """Encode real optimized wings through the LAE encoder → decode.
     If te_shifts_batch is provided, use it for y-alignment (forced tip alignment)
     instead of the decoder's eta_y_pred."""
     lae_model.encoder.eval()
     lae_model.decoder.eval()
+    is_joint = isinstance(lae_model.encoder, LAEEncoderJoint)
     with torch.no_grad():
+        pressure_dev = pressure_batch.to(device) if (is_joint and pressure_batch is not None) else None
         mu      = lae_model.encode(
-            z_opts_batch.to(device), params_batch.to(device)
+            z_opts_batch.to(device), params_batch.to(device), pressure=pressure_dev
         )
         z_masked = lae_model._apply_mask(mu)
         z_opt_pred, alpha_pred, eta_y_pred, pressure_pred_norm, perf_pred_norm = lae_model.decode(
@@ -308,12 +381,14 @@ def diagnose_train_vs_test(lae_model, bae_model, cfg, device, n_samples=250, n_d
                 torch.stack(gt_pressures), torch.stack(gt_perfs),
                 np.array(machs), torch.stack(te_shifts_list))
 
-    def reconstruct_batch(z_opts_batch, params_batch, te_shifts_batch):
+    def reconstruct_batch(z_opts_batch, params_batch, te_shifts_batch, pressure_batch=None):
         """Encode through LAE → apply mask → decode. Returns airfoils, AoAs, pressure, perf.
         If force_align=True, uses ground-truth te_shifts for y-alignment instead of eta_y_pred."""
+        is_joint = isinstance(lae_model.encoder, LAEEncoderJoint)
         with torch.no_grad():
+            pressure_dev = pressure_batch.to(device) if (is_joint and pressure_batch is not None) else None
             mu       = lae_model.encode(
-                z_opts_batch.to(device), params_batch.to(device)
+                z_opts_batch.to(device), params_batch.to(device), pressure=pressure_dev
             )
             z_masked = lae_model._apply_mask(mu)
             z_opt_pred, alpha_pred, eta_y_pred, pressure_pred, perf_pred = lae_model.decode(
@@ -359,9 +434,9 @@ def diagnose_train_vs_test(lae_model, bae_model, cfg, device, n_samples=250, n_d
 
     # ── Reconstruction pass (encode through LAE → decode) ────────────────────
     rec_train, rec_aoas_train, rec_press_train, rec_perf_train = reconstruct_batch(
-        z_opts_train, params_batch_train, te_shifts_train)
+        z_opts_train, params_batch_train, te_shifts_train, pressure_batch=gt_press_train)
     rec_test,  rec_aoas_test,  rec_press_test,  rec_perf_test  = reconstruct_batch(
-        z_opts_test,  params_batch_test,  te_shifts_test)
+        z_opts_test,  params_batch_test,  te_shifts_test,  pressure_batch=gt_press_test)
 
     def mse(a, b): return ((a - b) ** 2).mean().item()
     def aoa_mse(gen, gt): return ((torch.tensor(np.atleast_1d(gen)) - gt) ** 2).mean().item()
@@ -403,6 +478,45 @@ def diagnose_train_vs_test(lae_model, bae_model, cfg, device, n_samples=250, n_d
         te_mse = float(((rec_test_np[te_mask]  - gt_test_np[te_mask])  ** 2).mean()) if te_mask.any() else float("nan")
         print(f"[DIAG]  {label}: train n={tr_mask.sum():2d} MSE={tr_mse:.2e}  |  test n={te_mask.sum():2d} MSE={te_mse:.2e}")
     print("[DIAG] ────────────────────────────────────────────────────────────────────────\n")
+
+
+def collect_latents(lae_model, items, bae_model, device, apply_x_norm=True, batch_size=64):
+    """Encode a list of dataset items through the LAE encoder; return [N, latent_dim] tensor."""
+    from engiopt.lvae.unets import LAEEncoderJoint
+    lae_model.encoder.eval()
+    all_z = []
+    for start in range(0, len(items), batch_size):
+        chunk = items[start:start + batch_size]
+        z_opts_b, params_b, pressures_b = [], [], []
+        for item in chunk:
+            coords    = torch.tensor(item["coords"],    dtype=torch.float32)
+            te_shifts = torch.tensor(item["te_shifts"], dtype=torch.float32)
+            coords_u  = coords.clone()
+            coords_u[:, :, 1] -= te_shifts.unsqueeze(1)
+            if apply_x_norm:
+                te_x = coords_u[:, 0, 0]
+                coords_u[:, :, 0] += (1.0 - te_x).unsqueeze(1)
+            z_slices = []
+            for s in range(coords_u.shape[0]):
+                x_s = coords_u[s].permute(1, 0).unsqueeze(0).to(device)
+                with torch.no_grad():
+                    z_s = bae_model.encode(x_s, return_z=True, z_ae_mode=True)
+                z_slices.append(z_s.squeeze(0).cpu())
+            z_opts_b.append(torch.stack(z_slices))
+            flow_p = [item["mach"], item["reynolds"], item["cl_target"], item["area_case_ratio"]]
+            geo_p  = item.get("geo_params", np.zeros(34, dtype=np.float32)).tolist()
+            c_dim  = len(lae_model.scaler_params.mean)
+            params = torch.tensor((flow_p + geo_p)[:c_dim], dtype=torch.float32).unsqueeze(0).to(device)
+            params_b.append(lae_model.scaler_params.transform(params))
+            pressures_b.append(torch.tensor(np.array(item["coef_pressure"]), dtype=torch.float32))
+        z_opts_bt  = torch.stack(z_opts_b).to(device)
+        params_bt  = torch.cat(params_b, dim=0).to(device)
+        press_bt   = torch.stack(pressures_b).to(device)
+        is_joint   = isinstance(lae_model.encoder, LAEEncoderJoint)
+        with torch.no_grad():
+            mu = lae_model.encode(z_opts_bt, params_bt, pressure=press_bt if is_joint else None)
+        all_z.append(mu.cpu())
+    return torch.cat(all_z, dim=0)
 
 
 def main():
@@ -525,6 +639,26 @@ def main():
 
     print("[INFO] seed=0 — standard evaluation (no x0 conditioning)")
 
+    # ── Latent std diagnostic (train vs test) ────────────────────────────────
+    print("[INFO] Collecting train latents for std diagnostic...")
+    new_dataset_for_std = NewWingsDataset(_SLICES_PKL, _SCALARS_PKL, seed=cfg.seed)
+    train_items_for_std = [item for item in new_dataset_for_std["train"] if item["final"] == 1]
+    train_latents = collect_latents(lae_model, train_items_for_std, bae_model, device,
+                                    apply_x_norm=apply_x_norm)
+    print("[INFO] Collecting test latents for std diagnostic...")
+    test_latents  = collect_latents(lae_model, test_dataset,        bae_model, device,
+                                    apply_x_norm=apply_x_norm)
+    latent_std_path = os.path.join("results", "lvae_evaluation",
+                                   f"latent_std_{datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')}.png")
+    active_mask_np = lae_model.active_latent_mask.cpu().numpy()
+    lvae_plotting.plot_latent_std(
+        train_latents.numpy(), test_latents.numpy(),
+        active_mask=active_mask_np,
+        threshold=0.02,
+        save_path=latent_std_path,
+    )
+    print(f"[INFO] Latent std plot saved to {latent_std_path}")
+
     # ── Diagnostic: raw dataset coords vs BAE roundtrip (GT) ────────────────
     for sample_idx in range(min(3, gt_airfoils_t.shape[0])):
         raw_vs_bae_path = os.path.join(
@@ -626,6 +760,7 @@ def main():
             r_airfoil, r_aoa, r_pressure, r_perf = reconstruct_batch(
                 lae_model, bae_model, z_opts_batch, params_batch, device,
                 te_shifts_batch=te_shifts_batch,
+                pressure_batch=gt_pressures_t[start:end],
             )
             rec_airfoils.append(r_airfoil)
             rec_aoas.extend(np.atleast_1d(r_aoa).tolist())

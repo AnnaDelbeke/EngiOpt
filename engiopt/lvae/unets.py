@@ -278,6 +278,134 @@ class LAEDecoder(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Joint encoder: BAE latents + compressed pressure + conditions → z
+# ---------------------------------------------------------------------------
+
+class LAEEncoderJoint(nn.Module):
+    """Convolutional encoder that also takes pressure as input.
+
+    Pressure [B, w_dim, 192] is compressed per-span via a shared MLP
+    (192 → pressure_embed_dim), then concatenated as extra channels
+    alongside the BAE latents before the conv stack.
+
+    This keeps the encoder truly joint (geometry + pressure) without
+    the 2880-dim overfitting problem of feeding raw pressure.
+    """
+
+    def __init__(
+        self,
+        w_dim: int = 9,
+        latent_channels: int = 3,
+        latent_length: int = 30,
+        pressure_length: int = 192,
+        pressure_embed_dim: int = 16,
+        lae_latent_dim: int = 64,
+        c_dim: int = 4,
+        c_dim_latent: int = 16,
+        down_channels: list = [64, 128, 256, 512],
+        middle_channel: int = 256,
+        c_net_hidden_layers: list = [32, 32],
+        c_net_activation: str = 'GELU',
+        block_activation: str = 'GELU',
+        padding_mode: str = 'circular',
+        block_norms: list = None,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+
+        act   = convert_str_to_activ(block_activation)
+        c_act = convert_str_to_activ(c_net_activation)
+
+        self.w_dim              = w_dim
+        self.latent_channels    = latent_channels
+        self.latent_length      = latent_length
+        self.pressure_length    = pressure_length
+        self.pressure_embed_dim = pressure_embed_dim
+        self.lae_latent_dim     = lae_latent_dim
+        self.c_dim              = c_dim
+        self.c_dim_latent       = c_dim_latent
+
+        # Per-span pressure MLP: shared, maps [192] → [pressure_embed_dim]
+        self.pressure_encoder = nn.Sequential(
+            sn(nn.Linear(pressure_length, 64)),
+            c_act,
+            nn.Dropout(p=dropout) if dropout > 0.0 else nn.Identity(),
+            sn(nn.Linear(64, pressure_embed_dim)),
+            c_act,
+        )
+
+        # Condition embedding
+        c_layers = [c_dim] + c_net_hidden_layers + [c_dim_latent]
+        self.c_net = nn.Sequential(*[
+            nn.Sequential(sn(nn.Linear(c_layers[i], c_layers[i + 1])), c_act)
+            for i in range(len(c_layers) - 1)
+        ])
+
+        # Input channels: BAE latents + pressure embed + condition broadcast
+        # Pressure embed is broadcast along latent_length via a learned projection
+        self.pressure_proj = sn(nn.Linear(pressure_embed_dim, latent_length))
+        in_ch = w_dim * (latent_channels + 1) + c_dim_latent  # +1 channel per span for pressure
+
+        if block_norms is None:
+            block_norms = [True] * len(down_channels)
+
+        self.down_blocks = nn.ModuleList()
+        ch = in_ch
+        for out_ch, norm in zip(down_channels, block_norms):
+            self.down_blocks.append(
+                EncoderBlock(ch, out_ch, padding_mode=padding_mode,
+                             activation=act, norm=norm, use_sn=True)
+            )
+            ch = out_ch
+
+        self.middle = MiddleBlock(
+            ch, middle_channel, down_channels[-1],
+            padding_mode=padding_mode, activation=act, use_sn=True,
+        )
+
+        pool_out = down_channels[-1]
+        self.dropout  = nn.Dropout(p=dropout)
+        self.mu_head  = sn(nn.Linear(pool_out, lae_latent_dim))
+        self.span_embed = nn.Embedding(w_dim, latent_channels)
+
+    def forward(
+        self,
+        z_opt: torch.Tensor,     # [B, w_dim, latent_channels, latent_length]
+        c: torch.Tensor,          # [B, c_dim]
+        pressure: torch.Tensor,   # [B, w_dim, pressure_length]
+    ):
+        B = z_opt.shape[0]
+
+        # Span-position bias on BAE latents
+        slice_idx = torch.arange(self.w_dim, device=z_opt.device)
+        span_emb  = self.span_embed(slice_idx)                              # [w_dim, latent_channels]
+        z_opt     = z_opt + span_emb.unsqueeze(0).unsqueeze(-1)
+
+        # Compress pressure per span: [B*w_dim, 192] → [B*w_dim, embed] → [B, w_dim, L]
+        p_flat  = pressure.reshape(B * self.w_dim, self.pressure_length)
+        p_embed = self.pressure_encoder(p_flat)                             # [B*w_dim, embed]
+        p_seq   = self.pressure_proj(p_embed)                               # [B*w_dim, latent_length]
+        p_seq   = p_seq.reshape(B, self.w_dim, 1, self.latent_length)       # [B, w_dim, 1, L]
+
+        # Concatenate pressure channel alongside BAE latent channels
+        z_joint = torch.cat([z_opt, p_seq], dim=2)                          # [B, w_dim, lc+1, L]
+        x_in    = z_joint.reshape(B, self.w_dim * (self.latent_channels + 1), self.latent_length)
+
+        # Condition broadcast
+        c_emb = self.c_net(c)
+        c_emb = c_emb.unsqueeze(-1).expand(-1, -1, x_in.shape[-1])
+        x_in  = torch.cat([x_in, c_emb], dim=1)
+
+        for block in self.down_blocks:
+            x_in, _ = block(x_in)
+        x_in = self.middle(x_in)
+
+        h  = x_in.mean(dim=-1)
+        mu = self.mu_head(self.dropout(h))
+        return mu
+
+
+# ---------------------------------------------------------------------------
 # Backward-compat aliases (checkpoints created before the rename still load)
 # ---------------------------------------------------------------------------
 LVAEEncoder = LAEEncoder

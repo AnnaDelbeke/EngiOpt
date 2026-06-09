@@ -35,6 +35,8 @@ def parse_args():
     p.add_argument("--seed",     type=int, default=0)
     p.add_argument("--T",        type=int, default=None)
     p.add_argument("--out",      type=str, default=None)
+    p.add_argument("--full_span", action="store_true",
+                   help="Also save per-wing full-span 3D plots (gen vs GT side-by-side)")
     return p.parse_args()
 
 
@@ -90,7 +92,8 @@ def main():
     initial_by_case = {item["case_num"]: item for item in all_test if item["initial"] == 1}
     test_dataset    = [item for item in all_test if item["final"] == 1]
 
-    gt_coords, gt_aoas, gt_pressures, w_inits, params_norm, te_shifts_list, etas_list = \
+    gt_coords, gt_aoas, gt_pressures, gt_w, w_inits, params_norm, \
+        te_shifts_list, etas_list, case_nums = \
         precompute_test(
             test_dataset, initial_by_case, bae_model, lvae_model,
             lvae_params_scaler, cfg.lvae_params_dim, w_mean, w_std,
@@ -101,7 +104,7 @@ def main():
     print(f"Test set: {n_test} wings, plotting {n_wings}")
 
     # Generate
-    gen_coords, gen_aoas, gen_pressures, gen_te_shifts = ddm_w.generate(
+    gen_coords, gen_aoas, gen_pressures, gen_te_shifts, _ = ddm_w.generate(
         w_init=w_inits[:n_wings].to(device),
         params=params_norm[:n_wings].to(device),
         device=device,
@@ -125,7 +128,7 @@ def main():
     pmin = float(np.nanpercentile(all_p, 2))
     pmax = float(np.nanpercentile(all_p, 98))
 
-    wing_len = 2.25
+    wing_len = 2.505
     n_rows   = 4
     fig = plt.figure(figsize=(10 * n_wings, 10 * n_rows), dpi=150)
 
@@ -180,6 +183,53 @@ def main():
     fig.savefig(out_path, bbox_inches='tight')
     print(f"Saved to {out_path}")
 
+    # Full-span 3D wing plots (one figure per wing, gen vs GT, multiple viewpoints)
+    if args.full_span:
+        fullspan_dir = os.path.join(os.path.dirname(out_path), "fullspan_3d_w")
+        os.makedirs(fullspan_dir, exist_ok=True)
+
+        views = [
+            ("perspective",  15, -60),   # standard 3/4 view
+            ("front",         0,  -90),   # looking along span (root → tip)
+            ("top",          90,  -90),   # plan view from above
+            ("side",          0,    0),   # profile view (chord-thickness)
+        ]
+
+        for i in range(n_wings):
+            mach, re, cl, ar = raw_flow[i]
+            aoa_str  = f"{float(np.atleast_1d(gen_aoas)[i]):.1f}"
+            cond_str = f"M={mach:.2f}  Re={re/1e6:.2f}M  CL={cl:.2f}  AR={ar:.2f}"
+            n_slices = gen_coords.shape[1]
+            z_full   = np.linspace(0, wing_len, n_slices)
+
+            n_views = len(views)
+            fig3d = plt.figure(figsize=(8 * n_views, 10), dpi=150)
+
+            for col, (view_name, elev, azim) in enumerate(views):
+                # Generated
+                ax = fig3d.add_subplot(2, n_views, col + 1, projection='3d')
+                wing_3D_shape_plot(gen_coords[i].numpy(), ax=ax, facecolor='steelblue',
+                                   alpha=0.8, z=z_full, wing_len=wing_len)
+                ax.view_init(elev=elev, azim=azim)
+                ax.set_title(f"Gen — {view_name}\nAoA={aoa_str}°", fontsize=8)
+
+                # Ground truth
+                ax = fig3d.add_subplot(2, n_views, n_views + col + 1, projection='3d')
+                wing_3D_shape_plot(gt_coords[i].numpy(), ax=ax, facecolor='coral',
+                                   alpha=0.8, z=z_full, wing_len=wing_len)
+                ax.view_init(elev=elev, azim=azim)
+                ax.set_title(f"GT — {view_name}\nAoA={gt_aoas[i].item():.1f}°", fontsize=8)
+
+            fig3d.suptitle(
+                f"Wing {i+1}  |  {cond_str}\nRow 1: Generated (blue)   Row 2: Ground Truth (coral)",
+                fontsize=10,
+            )
+            plt.tight_layout()
+            fs_path = os.path.join(fullspan_dir, f"fullspan_wing_{i+1:02d}.png")
+            fig3d.savefig(fs_path, bbox_inches='tight')
+            plt.close(fig3d)
+            print(f"Saved full-span 3D to {fs_path}")
+
     # Spanwise slice plots
     slices_dir = os.path.join(os.path.dirname(out_path), "spanwise_slices_w")
     os.makedirs(slices_dir, exist_ok=True)
@@ -191,6 +241,27 @@ def main():
         mach, re, cl, ar = raw_flow[i]
         gen_np = gen_coords[i].numpy()
         gt_np  = gt_coords[i].numpy()
+        case_num = case_nums[i]
+
+        # Detect self-intersecting slices: upper/lower surfaces cross if
+        # any upper y < lower y at the same x index
+        crossing_slices = []
+        for s in range(gen_np.shape[0]):
+            n_pts = gen_np.shape[2]
+            le_idx = int(np.argmin(gen_np[s, 0]))
+            te_idx = int(np.argmax(gen_np[s, 0]))
+            if le_idx < te_idx:
+                upper_idx = np.arange(le_idx, te_idx + 1)
+                lower_idx = np.concatenate([np.arange(te_idx, n_pts), np.arange(0, le_idx + 1)])
+            else:
+                upper_idx = np.concatenate([np.arange(le_idx, n_pts), np.arange(0, te_idx + 1)])
+                lower_idx = np.arange(te_idx, le_idx + 1)
+            upper_y = gen_np[s, 1, upper_idx]
+            lower_y = gen_np[s, 1, lower_idx]
+            if upper_y.min() < lower_y.max():
+                crossing_slices.append(s)
+        if crossing_slices:
+            print(f"  Wing {i+1} (case {case_num}): self-intersecting slices {crossing_slices}")
 
         fig_sp, axes = plt.subplots(
             n_rows_sp * 2, n_cols,
@@ -204,13 +275,20 @@ def main():
             col     = s % n_cols
 
             n_pts = gen_np.shape[2]
-            half  = n_pts // 2
             for ax, arr, color, label in [
                 (axes[row_gen, col], gen_np[s], 'steelblue', f"Gen  slice {s}"),
                 (axes[row_gt,  col], gt_np[s],  'coral',     f"GT   slice {s}"),
             ]:
-                ax.plot(arr[0, :half],  arr[1, :half],  color=color, lw=1.5)
-                ax.plot(arr[0, half:],  arr[1, half:],  color=color, lw=1.5)
+                le_idx = int(np.argmin(arr[0]))
+                te_idx = int(np.argmax(arr[0]))
+                if le_idx < te_idx:
+                    upper = np.arange(le_idx, te_idx + 1)
+                    lower = np.concatenate([np.arange(te_idx, n_pts), np.arange(0, le_idx + 1)])
+                else:
+                    upper = np.concatenate([np.arange(le_idx, n_pts), np.arange(0, te_idx + 1)])
+                    lower = np.arange(te_idx, le_idx + 1)
+                ax.plot(arr[0, upper], arr[1, upper], color=color, lw=1.5)
+                ax.plot(arr[0, lower], arr[1, lower], color=color, lw=1.5)
                 ax.set_title(label, fontsize=7)
                 ax.set_aspect('equal')
                 ax.set_xlim(-0.05, 1.05)

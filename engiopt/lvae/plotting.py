@@ -632,8 +632,8 @@ def plot_reconstruction_error_histograms(
     gt_airfoils: torch.Tensor,
     rec_pressures: torch.Tensor,
     gt_pressures: torch.Tensor,
-    rec_perfs: torch.Tensor,
-    gt_perfs: torch.Tensor,
+    rec_perfs: torch.Tensor = None,
+    gt_perfs: torch.Tensor = None,
     save_path: str = None,
 ):
     """Histogram of per-sample reconstruction errors across the test set.
@@ -657,25 +657,28 @@ def plot_reconstruction_error_histograms(
     gt_airfoils   = _np(gt_airfoils)
     rec_pressures = _np(rec_pressures)
     gt_pressures  = _np(gt_pressures)
-    rec_perfs     = _np(rec_perfs)
-    gt_perfs      = _np(gt_perfs)
+    rec_perfs     = _np(rec_perfs) if rec_perfs is not None else None
+    gt_perfs      = _np(gt_perfs)  if gt_perfs  is not None else None
 
     N = rec_airfoils.shape[0]
 
     # Per-sample errors
     shape_mse = ((rec_airfoils - gt_airfoils) ** 2).reshape(N, -1).mean(axis=1)
     cp_mse    = ((rec_pressures - gt_pressures) ** 2).reshape(N, -1).mean(axis=1)
-    cd_err    = np.abs(rec_perfs[:, 0] - gt_perfs[:, 0])
-    cl_err    = np.abs(rec_perfs[:, 1] - gt_perfs[:, 1])
 
     metrics = [
-        (shape_mse, "Shape MSE",     "shape MSE"),
-        (cp_mse,    "Cp MSE",        "Cp MSE"),
-        (cd_err,    "cd |error|",    "cd absolute error"),
-        (cl_err,    "cl |error|",    "cl absolute error"),
+        (shape_mse, "Shape MSE",  "shape MSE"),
+        (cp_mse,    "Cp MSE",     "Cp MSE"),
     ]
+    if rec_perfs is not None and gt_perfs is not None:
+        rec_perfs = _np(rec_perfs)
+        gt_perfs  = _np(gt_perfs)
+        metrics += [
+            (np.abs(rec_perfs[:, 0] - gt_perfs[:, 0]), "cd |error|", "cd absolute error"),
+            (np.abs(rec_perfs[:, 1] - gt_perfs[:, 1]), "cl |error|", "cl absolute error"),
+        ]
 
-    fig, axes = plt.subplots(1, 4, figsize=(18, 4))
+    fig, axes = plt.subplots(1, len(metrics), figsize=(5 * len(metrics), 4))
 
     for ax, (values, short, long) in zip(axes, metrics):
         ax.hist(values, bins=40, color='steelblue', edgecolor='white', linewidth=0.4)
@@ -828,3 +831,67 @@ def plot_generated_wings(generated_airfoils, generated_alphas, save_dir=None):
             plt.close()
         else:
             plt.show()
+
+
+def plot_latent_std(
+    train_z: np.ndarray,
+    test_z: np.ndarray,
+    active_mask: np.ndarray = None,
+    threshold: float = 0.02,
+    save_path: str = None,
+):
+    """Bar chart of per-dimension std in the LAE latent space.
+
+    Args:
+        train_z:     [N_train, latent_dim]  encoded train latents.
+        test_z:      [N_test,  latent_dim]  encoded test latents.
+        active_mask: [latent_dim] bool — which dims are active (optional).
+        threshold:   std threshold line drawn on the plot.
+        save_path:   Save path if given, else show interactively.
+    """
+    if isinstance(train_z, torch.Tensor):
+        train_z = train_z.cpu().numpy()
+    if isinstance(test_z, torch.Tensor):
+        test_z = test_z.cpu().numpy()
+
+    train_std = train_z.std(axis=0)
+    test_std  = test_z.std(axis=0)
+    latent_dim = train_std.shape[0]
+    dims = np.arange(latent_dim)
+
+    # Sort by descending train std so the active dims appear first
+    order = np.argsort(train_std)[::-1]
+    train_std_sorted = train_std[order]
+    test_std_sorted  = test_std[order]
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 4), sharey=False)
+
+    for ax, std_vals, label, color in [
+        (axes[0], train_std_sorted, "Train", "#4878d0"),
+        (axes[1], test_std_sorted,  "Test",  "#ee854a"),
+    ]:
+        bar_colors = []
+        for i, orig_idx in enumerate(order):
+            if active_mask is not None:
+                bar_colors.append(color if active_mask[orig_idx] else "#cccccc")
+            else:
+                bar_colors.append(color if std_vals[i] >= threshold else "#cccccc")
+
+        ax.bar(dims, std_vals, color=bar_colors, width=0.8)
+        ax.axhline(threshold, color="red", linestyle="--", linewidth=1.0, label=f"threshold={threshold}")
+        ax.set_xlabel("Latent dimension (sorted by train std)")
+        ax.set_ylabel("Std")
+        ax.set_title(f"{label} latent std  (n={train_z.shape[0] if label=='Train' else test_z.shape[0]})")
+        ax.legend(fontsize=8)
+
+        n_active = int((std_vals >= threshold).sum())
+        ax.text(0.98, 0.97, f"active (≥{threshold}): {n_active}/{latent_dim}",
+                transform=ax.transAxes, ha="right", va="top", fontsize=8)
+
+    plt.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close()
+    else:
+        plt.show()

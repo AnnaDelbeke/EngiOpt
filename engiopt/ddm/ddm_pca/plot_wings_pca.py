@@ -76,7 +76,7 @@ def main():
     initial_by_case = {item["case_num"]: item for item in all_test if item["initial"] == 1}
     test_dataset    = [item for item in all_test if item["final"] == 1]
 
-    gt_coords, gt_aoas, z_inits, params_norm = precompute_test(
+    gt_coords, gt_aoas, gt_z, z_inits, params_norm = precompute_test(
         test_dataset, initial_by_case, bae_model, pca,
         z_mean, z_std, ddm_pca.scaler_params, ddm_pca.scaler_aoas,
         cfg, device,
@@ -85,7 +85,7 @@ def main():
     n_wings = min(args.n_wings, n_test)
     print(f"Test set: {n_test} wings, plotting {n_wings}")
 
-    gen_coords, gen_aoas = ddm_pca.generate(
+    gen_coords, gen_aoas, _ = ddm_pca.generate(
         z_init=z_inits[:n_wings].to(device),
         params=params_norm[:n_wings].to(device),
         device=device,

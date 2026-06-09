@@ -238,7 +238,7 @@ class DDM_PCA:
         else:
             aoas = aoa_noisy.squeeze(1)
 
-        return coords.cpu(), aoas.cpu()
+        return coords.cpu(), aoas.cpu(), z_raw.cpu()
 
     def save(self, save_dir, suffix=""):
         os.makedirs(save_dir, exist_ok=True)

@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 
 from engiopt.bezier_ae.bezier_ae import BezierAutoencoder
 from engiopt.lvae.lvae import LAE_AoAInit
-from engiopt.lvae.unets import LAEEncoder, LAEDecoder
+from engiopt.lvae.unets import LAEEncoder, LAEDecoder, LAEEncoderJoint
 from engiopt.lvae import samplers
 from engiopt.lvae import plotting as lvae_plotting
 from engiopt.data_processing.utils import scaler
@@ -235,6 +235,22 @@ def build_encoder(cfg: Config) -> LAEEncoder:
     ).to(cfg.device)
 
 
+def build_encoder_joint(cfg: Config) -> LAEEncoderJoint:
+    return LAEEncoderJoint(
+        w_dim=cfg.w_dim,
+        latent_channels=cfg.latent_channels,
+        latent_length=cfg.latent_length,
+        pressure_length=cfg.pressure_length,
+        pressure_embed_dim=16,
+        lae_latent_dim=cfg.lae_latent_dim,
+        c_dim=cfg.c_dim,
+        c_dim_latent=16,
+        down_channels=[64, 128, 256, 512],
+        middle_channel=256,
+        dropout=cfg.dropout,
+    ).to(cfg.device)
+
+
 def build_decoder(cfg: Config, use_pressure: bool = True) -> LAEDecoder:
     return LAEDecoder(
         w_dim=cfg.w_dim,
@@ -281,9 +297,11 @@ def fit_perf_regressor(
     with torch.no_grad():
         for batch in loader:
             z_opt, aoa, params, eta_y, pressure, perf = batch
-            z = lae_model.encoder(
+            pressure_ = pressure.to(device).float()
+            z = lae_model.encode(
                 z_opt.to(device),
                 params.to(device).float(),
+                pressure=pressure_ if lae_model._is_joint_encoder() else None,
             )
             z_masked = lae_model._apply_mask(z)
             zs_masked.append(z_masked.cpu())
@@ -477,6 +495,7 @@ def select_evolution_wings(val_dataset_raw, bae_model, lae_model, device, apply_
         "params":        torch.cat(params_scaled_list, dim=0),# [3, c_dim]
         "te_shifts":     torch.stack(te_shifts_list),         # [3, n_slices]
         "flow_conditions": flow_conditions,
+        "pressures":     torch.stack(gt_pressures),           # [3, n_slices, 192] — for joint encoder
     }
 
 
@@ -488,12 +507,14 @@ def make_evolution_image(lae_model, bae_model, evo_wings, device, epoch):
     lae_model.encoder.eval()
     lae_model.decoder.eval()
 
-    z_opts   = evo_wings["z_opts"]
-    params   = evo_wings["params"]
+    z_opts    = evo_wings["z_opts"]
+    params    = evo_wings["params"]
     te_shifts = evo_wings["te_shifts"]
+    pressures = evo_wings.get("pressures")
 
     with torch.no_grad():
-        mu      = lae_model.encode(z_opts.to(device), params.to(device))
+        pressure_dev = pressures.to(device) if (pressures is not None and lae_model._is_joint_encoder()) else None
+        mu      = lae_model.encode(z_opts.to(device), params.to(device), pressure=pressure_dev)
         z_masked = lae_model._apply_mask(mu)
         z_opt_pred, alpha_pred, eta_y_pred, pressure_pred_norm, perf_pred_norm = lae_model.decode(
             z_masked, params.to(device)
@@ -595,6 +616,8 @@ def parse_args():
                         help="Override prune_every (0 = disable pruning).")
     parser.add_argument("--prune_threshold", type=float, default=None,
                         help="Override prune_threshold (0.0 = keep all dims).")
+    parser.add_argument("--joint_encoder", action="store_true",
+                        help="Use LAEEncoderJoint: encoder sees compressed pressure (192→16 per span) + geometry.")
     parser.add_argument("--no_pressure", action="store_true",
                         help="Remove pressure head from decoder entirely (geometry-only isolation test).")
     parser.add_argument("--flow_only", action="store_true",
@@ -756,7 +779,12 @@ def main():
                             num_workers=cfg.num_workers)
 
     # 5) Build model
-    encoder = build_encoder(cfg)
+    if args.joint_encoder:
+        encoder = build_encoder_joint(cfg)
+        print("Using joint encoder (pressure_embed_dim=16).")
+    else:
+        encoder = build_encoder(cfg)
+        print("Using geometry-only encoder.")
     decoder = build_decoder(cfg, use_pressure=not args.no_pressure)
     sampler = build_sampler(cfg)
     print("Built encoder/decoder.")

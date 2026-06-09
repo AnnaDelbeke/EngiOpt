@@ -1,0 +1,38 @@
+#!/bin/bash
+#SBATCH --job-name=ddm_w_3d_abl_eval
+#SBATCH --time=01:00:00
+#SBATCH --cpus-per-task=2
+#SBATCH --mem-per-cpu=16G
+#SBATCH --gpus=1
+#SBATCH --partition=gpu.4h
+#SBATCH --output=logs/ddm_w_3d_ablation_eval_%A_%a.out
+#SBATCH --array=0-19
+
+module purge
+module load stack/2024-06 python/3.10.13
+
+cd ~/EngiOpt
+mkdir -p logs
+source .venv/bin/activate
+
+export HF_DATASETS_OFFLINE=1
+
+# Must match train_ddm_w_3d_ablation.slurm exactly
+N_SAMPLES=(50 100 150 200 300 400 500 600 700 767)
+SEEDS=(0 1)
+
+N_IDX=$(( SLURM_ARRAY_TASK_ID / 2 ))
+S_IDX=$(( SLURM_ARRAY_TASK_ID % 2 ))
+
+N=${N_SAMPLES[$N_IDX]}
+S=${SEEDS[$S_IDX]}
+
+CHECKPOINT="results/ddm_w_3d_ablation/n${N}_s${S}/ddm_w_3d_ablation_n${N}_s${S}_best.pth"
+
+echo "Array task $SLURM_ARRAY_TASK_ID -> checkpoint=$CHECKPOINT"
+
+python -u -m engiopt.ddm.ddm_w.evaluate_ddm_w_3d \
+    --checkpoint      $CHECKPOINT \
+    --bae_checkpoint  results/bezier_ae_3d/run_040/models/bezier_ae_3d_best.pt \
+    --lvae_checkpoint results/lvae_3d/lvae_3d_v8_best.pth \
+    --out_dir         results/ddm_w_3d_ablation/n${N}_s${S}

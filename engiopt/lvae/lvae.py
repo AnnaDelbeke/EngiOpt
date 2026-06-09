@@ -95,7 +95,15 @@ class LAE_AoAInit:
             self._ema_std = self._ema_std.to(device)
         return self
 
-    def encode(self, z_opt, c):
+    def _is_joint_encoder(self):
+        from engiopt.lvae.unets import LAEEncoderJoint
+        return isinstance(self.encoder, LAEEncoderJoint)
+
+    def encode(self, z_opt, c, pressure=None):
+        if self._is_joint_encoder():
+            if pressure is None:
+                raise ValueError("Joint encoder requires pressure input.")
+            return self.encoder(z_opt, c, pressure)
         return self.encoder(z_opt, c)
 
     def decode(self, z, c):
@@ -115,7 +123,10 @@ class LAE_AoAInit:
         pressure = pressure.to(device).float()
         perf     = perf.to(device).float()
 
-        z        = self.encoder(z_opt, params)
+        if self._is_joint_encoder():
+            z = self.encoder(z_opt, params, pressure)
+        else:
+            z = self.encoder(z_opt, params)
         z_masked = self._apply_mask(z)
 
         z_opt_pred, alpha_pred, eta_y_pred, pressure_pred, perf_pred = self.decoder(z_masked, params)
@@ -190,9 +201,13 @@ class LAE_AoAInit:
         with torch.no_grad():
             for batch in loader:
                 z_opt, aoa, params, eta_y, pressure, perf = batch
-                z_opt  = z_opt.to(device)
-                params = params.to(device).float()
-                z = self.encoder(z_opt, params)
+                z_opt    = z_opt.to(device)
+                params   = params.to(device).float()
+                pressure = pressure.to(device).float()
+                if self._is_joint_encoder():
+                    z = self.encoder(z_opt, params, pressure)
+                else:
+                    z = self.encoder(z_opt, params)
                 all_z.append(z.cpu())
         self.encoder.train()
 

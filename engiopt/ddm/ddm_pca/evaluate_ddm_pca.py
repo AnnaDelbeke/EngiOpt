@@ -60,7 +60,8 @@ def compute_vendi(samples, gamma):
     return (-(ev * ev.log()).sum()).exp().item()
 
 
-def compute_metrics(generated, gt_airfoils, gen_aoas, gt_aoas):
+def compute_metrics(generated, gt_airfoils, gen_aoas, gt_aoas,
+                    gen_z=None, gt_z=None):
     n_slices  = generated.shape[1]
     shape_mse = 0.0
     mmd_vals, vendi_gen_vals, vendi_gt_vals = [], [], []
@@ -81,7 +82,13 @@ def compute_metrics(generated, gt_airfoils, gen_aoas, gt_aoas):
     vendi_norm = float(np.mean(vendi_gen_vals)) / vendi_gt if vendi_gt > 0 else 0.0
     aoa_mse    = ((gen_aoas - gt_aoas) ** 2).mean().item()
 
-    return {"shape_mse": shape_mse, "aoa_mse": aoa_mse, "mmd": mmd, "vendi": vendi_norm}
+    out = {"shape_mse": shape_mse, "aoa_mse": aoa_mse, "mmd": mmd, "vendi": vendi_norm}
+
+    # MMD in PCA latent space (64-dim) — more meaningful than 384-dim coord space
+    if gen_z is not None and gt_z is not None:
+        out["mmd_z"] = float(np.mean([compute_mmd(gen_z, gt_z, g) for g in GAMMAS]))
+
+    return out
 
 
 def precompute_test(test_dataset, initial_by_case, bae_model, pca,
@@ -90,6 +97,7 @@ def precompute_test(test_dataset, initial_by_case, bae_model, pca,
     """Encode test set through BAE → PCA, return normalised z_inits and gt coords."""
     gt_coords_list = []
     gt_aoas_list   = []
+    gt_z_list      = []   # PCA latent of GT optimised wing (unnormalised)
     z_inits_list   = []
     params_list    = []
 
@@ -118,6 +126,11 @@ def precompute_test(test_dataset, initial_by_case, bae_model, pca,
             gt_coords_list.append(torch.stack(gt_slices))
             gt_aoas_list.append(torch.tensor(float(item["alpha"])))
 
+            # PCA latent of the GT optimised wing
+            z_gt_flat = torch.stack(z_slices).flatten().unsqueeze(0).numpy()
+            z_gt_pca  = torch.tensor(pca.transform(z_gt_flat), dtype=torch.float32).squeeze(0)
+            gt_z_list.append(z_gt_pca)
+
             # w_init via PCA
             case_num = int(item["case_num"])
             if case_num in initial_by_case:
@@ -145,6 +158,7 @@ def precompute_test(test_dataset, initial_by_case, bae_model, pca,
     return (
         torch.stack(gt_coords_list),
         torch.stack(gt_aoas_list),
+        torch.stack(gt_z_list),
         torch.stack(z_inits_list),
         torch.stack(params_list),
     )
@@ -206,7 +220,7 @@ def main():
     test_dataset    = [item for item in all_test if item["final"] == 1]
     print(f"Test set: {len(test_dataset)} wings")
 
-    gt_coords, gt_aoas, z_inits, params_norm = precompute_test(
+    gt_coords, gt_aoas, gt_z, z_inits, params_norm = precompute_test(
         test_dataset, initial_by_case, bae_model, pca,
         z_mean, z_std, ddm_pca.scaler_params, ddm_pca.scaler_aoas,
         cfg, device,
@@ -216,20 +230,24 @@ def main():
 
     all_coords = []
     all_aoas   = []
+    all_z      = []
     for pass_i in range(args.n_passes):
-        coords_pass, aoas_pass = ddm_pca.generate(
+        coords_pass, aoas_pass, z_pass = ddm_pca.generate(
             z_init=z_inits.to(device),
             params=params_norm.to(device),
             device=device, T=args.T,
         )
         all_coords.append(coords_pass)
         all_aoas.append(aoas_pass)
+        all_z.append(z_pass)
         print(f"  Pass {pass_i+1}/{args.n_passes} done.")
 
     gen_coords = torch.stack(all_coords, dim=0).mean(0)
     gen_aoas   = torch.stack(all_aoas,   dim=0).mean(0)
+    gen_z      = torch.stack(all_z,      dim=0).mean(0)
 
-    metrics = compute_metrics(gen_coords, gt_coords, gen_aoas, gt_aoas)
+    metrics = compute_metrics(gen_coords, gt_coords, gen_aoas, gt_aoas,
+                              gen_z=gen_z, gt_z=gt_z)
 
     print("\n=== Evaluation Results ===")
     for k, v in metrics.items():

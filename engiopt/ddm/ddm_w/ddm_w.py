@@ -71,8 +71,8 @@ class MLPDenoiser(nn.Module):
 
     Backbone input:  [B, w_dim + w_dim + c_dim + t_embed_dim]
                      (noisy_w, w_init, params, t_emb)
-    AoA head input:  [B, hidden + 1 + c_dim + t_embed_dim]
-                     (h, aoa_noisy, params, t_emb)
+    AoA head input:  [B, hidden + 1 + c_dim + t_embed_dim + w_dim]
+                     (h, aoa_noisy, params, t_emb, w_init)
 
     aoa_noisy is kept out of the backbone so it has a dedicated gradient
     path and cannot be ignored in favour of the 64-dim w signal.
@@ -108,8 +108,8 @@ class MLPDenoiser(nn.Module):
         self.net   = nn.Sequential(*layers)
         self.out_w = nn.Linear(prev, w_dim)
 
-        # AoA head: h + aoa_noisy + params + t_emb → scalar noise
-        aoa_in = prev + 1 + c_dim + t_embed_dim
+        # AoA head: h + aoa_noisy + params + t_emb + w_init → scalar noise
+        aoa_in = prev + 1 + c_dim + t_embed_dim + w_dim
         self.aoa_head = nn.Sequential(
             nn.Linear(aoa_in, 128),
             nn.SiLU(),
@@ -143,7 +143,7 @@ class MLPDenoiser(nn.Module):
         h = self.net(x)                                                   # [B, hidden]
 
         w_pred   = self.out_w(h)                                          # [B, w_dim]
-        aoa_pred = self.aoa_head(torch.cat([h, aoa_noisy, params, t_emb], dim=1))  # [B, 1]
+        aoa_pred = self.aoa_head(torch.cat([h, aoa_noisy, params, t_emb, w_init], dim=1))  # [B, 1]
 
         return w_pred, aoa_pred
 
@@ -445,7 +445,7 @@ class DDM_W:
 
         te_shifts = eta_y_pred.squeeze(-1)  # [B, S]
 
-        return coords.cpu(), aoas.cpu(), pressures.cpu(), te_shifts.cpu()
+        return coords.cpu(), aoas.cpu(), pressures.cpu(), te_shifts.cpu(), w_raw.cpu()
 
     # ------------------------------------------------------------------
     # Save / Load
@@ -455,7 +455,7 @@ class DDM_W:
         os.makedirs(save_dir, exist_ok=True)
         path = os.path.join(save_dir, f"{self.name}{suffix}.pth")
         torch.save({
-            'denoiser':         self.denoiser,
+            'denoiser':         self.denoiser.state_dict(),
             'optimizer':        self.optimizer.state_dict(),
             'stats':            self.stats,
             'w_mean':           self.w_mean,
