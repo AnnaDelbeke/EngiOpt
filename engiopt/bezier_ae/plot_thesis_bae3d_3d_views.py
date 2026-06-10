@@ -183,13 +183,14 @@ def plot_gt_vs_recon(gt: np.ndarray, recon: np.ndarray,
 
 def plot_rotating_gifs(gt: np.ndarray, recon: np.ndarray,
                        save_dir: str, scratch: str,
-                       n_frames: int = 72, fps: int = 20):
+                       n_frames: int = 36, fps: int = 12):
+    """36 frames at 12fps = 3s loop, much lower memory than 72@20."""
     azimuths = np.linspace(0, 360, n_frames, endpoint=False)
     os.makedirs(save_dir, exist_ok=True)
     os.makedirs(scratch, exist_ok=True)
 
     # GIF 1 — reconstruction only
-    fig1 = plt.figure(figsize=(8, 5))
+    fig1 = plt.figure(figsize=(6, 4))
     ax1  = fig1.add_subplot(111, projection="3d")
     surf1 = _draw_surface(ax1, recon, "3D BAE — Reconstructed Wing Surface")
     fig1.colorbar(surf1, ax=ax1, shrink=0.45, pad=0.08, aspect=20,
@@ -203,12 +204,12 @@ def plot_rotating_gifs(gt: np.ndarray, recon: np.ndarray,
                          interval=1000 // fps, blit=False)
     for base in (save_dir, scratch):
         path = os.path.join(base, "bae3d_surface_mesh_rotating.gif")
-        ani1.save(path, writer="pillow", fps=fps, dpi=100)
+        ani1.save(path, writer="pillow", fps=fps, dpi=80)
         print(f"Saved: {path}")
     plt.close(fig1)
 
-    # GIF 2 — GT vs reconstruction
-    fig2 = plt.figure(figsize=(16, 5))
+    # GIF 2 — GT vs reconstruction (smaller to keep memory down)
+    fig2 = plt.figure(figsize=(10, 4))
     ax_gt    = fig2.add_subplot(121, projection="3d")
     ax_recon = fig2.add_subplot(122, projection="3d")
     surf_gt  = _draw_surface(ax_gt,    gt,    "Ground Truth")
@@ -216,7 +217,7 @@ def plot_rotating_gifs(gt: np.ndarray, recon: np.ndarray,
     fig2.colorbar(surf_gt, ax=[ax_gt, ax_recon], shrink=0.5, pad=0.04,
                   aspect=25, label="y/c  (surface height)")
     fig2.suptitle("3D BAE — Ground Truth vs. Reconstruction",
-                  fontsize=12, y=1.01)
+                  fontsize=11, y=1.01)
 
     def update2(frame):
         ax_gt.view_init(elev=22, azim=azimuths[frame])
@@ -227,7 +228,7 @@ def plot_rotating_gifs(gt: np.ndarray, recon: np.ndarray,
                          interval=1000 // fps, blit=False)
     for base in (save_dir, scratch):
         path = os.path.join(base, "bae3d_gt_vs_recon_rotating.gif")
-        ani2.save(path, writer="pillow", fps=fps, dpi=100)
+        ani2.save(path, writer="pillow", fps=fps, dpi=80)
         print(f"Saved: {path}")
     plt.close(fig2)
 
