@@ -182,4 +182,4 @@ class DDM_W3D(DDM_W):
 
         te_shifts = eta_y_pred.squeeze(-1)   # [B, S]
 
-        return coords.cpu(), aoas.cpu(), pressures.cpu(), te_shifts.cpu(), w_raw.cpu()
+        return coords.cpu(), aoas.cpu(), pressures.cpu(), te_shifts.cpu(), w_raw.cpu(), z_bae_pred.cpu()

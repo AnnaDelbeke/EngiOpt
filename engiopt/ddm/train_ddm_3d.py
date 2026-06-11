@@ -184,14 +184,18 @@ def precompute_z(dataset_items, initial_by_case, bae_model, device):
 
 def load_bae_3d(checkpoint: str, device: str, latent_dim: int = 64,
                 n_spans: int = 15) -> BezierAutoencoder3D:
+    ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
+    sd   = ckpt.get("model_state_dict", ckpt)
+    # infer architecture from weights so any checkpoint variant loads correctly
+    slice_h0  = sd["slice_encoder.0.weight"].shape[0]
+    slice_h1  = sd["slice_encoder.2.weight"].shape[0]
+    latent_dim = sd["span_encoder.4.weight"].shape[0]
     model = BezierAutoencoder3D(
         n_spans=n_spans,
         latent_dim=latent_dim,
-        slice_hidden_dims=[64, 32],
-        span_hidden_dims=[64, 32],
+        slice_hidden_dims=[slice_h0, slice_h1],
+        span_hidden_dims=[slice_h0, slice_h1],
     ).to(device)
-    ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
-    sd   = ckpt.get("model_state_dict", ckpt)
     model.load_state_dict(sd)
     model.eval()
     for p in model.parameters():

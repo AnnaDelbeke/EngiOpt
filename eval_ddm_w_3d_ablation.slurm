@@ -27,12 +27,12 @@ S_IDX=$(( SLURM_ARRAY_TASK_ID % 2 ))
 N=${N_SAMPLES[$N_IDX]}
 S=${SEEDS[$S_IDX]}
 
-CHECKPOINT="results/ddm_w_3d_ablation/n${N}_s${S}/ddm_w_3d_ablation_n${N}_s${S}_best.pth"
+CHECKPOINT="results/ddm_w_3d_ablation_v29/n${N}_s${S}/ddm_w_3d_ablation_n${N}_s${S}_best.pth"
 
 echo "Array task $SLURM_ARRAY_TASK_ID -> checkpoint=$CHECKPOINT"
 
 python -u -m engiopt.ddm.ddm_w.evaluate_ddm_w_3d \
     --checkpoint      $CHECKPOINT \
-    --bae_checkpoint  results/bezier_ae_3d/run_040/models/bezier_ae_3d_best.pt \
-    --lvae_checkpoint results/lvae_3d/lvae_3d_v8_best.pth \
-    --out_dir         results/ddm_w_3d_ablation/n${N}_s${S}
+    --bae_checkpoint  results/bezier_ae_3d/run_039/models/bezier_ae_3d_best.pt \
+    --lvae_checkpoint results/lvae_3d/lvae_3d_v29_best.pth \
+    --out_dir         results/ddm_w_3d_ablation_v29/n${N}_s${S}

@@ -13,7 +13,7 @@ Usage
     python -m engiopt.bezier_ae.plot_thesis_bae3d_3d_views \
         --checkpoint results/bezier_ae_3d/run_039/models/bezier_ae_3d_best.pt \
         --run_dir    results/bezier_ae_3d/run_039 \
-        --wing_idx   0
+        --wing_indices 0 1 2 3 4
 """
 
 import argparse
@@ -106,7 +106,7 @@ def _draw_surface(ax, data: np.ndarray, title: str):
 
 # ── Figure 1: exploded spanwise view ─────────────────────────────────────────
 
-def plot_exploded_view(recon: np.ndarray, save_dir: str, scratch: str):
+def plot_exploded_view(recon: np.ndarray, save_dir: str, scratch: str, stem: str = "bae3d_exploded_view"):
     S = recon.shape[0]
     colours  = _span_colours(S)
     span_pos = np.linspace(0.0, 1.0, S)
@@ -146,26 +146,26 @@ def plot_exploded_view(recon: np.ndarray, save_dir: str, scratch: str):
     ax.zaxis.pane.fill = False
     ax.grid(True, linewidth=0.3, alpha=0.4)
 
-    _save(fig, save_dir, scratch, "bae3d_exploded_view")
+    _save(fig, save_dir, scratch, stem)
     plt.close()
 
 
 # ── Figure 2: reconstruction surface ─────────────────────────────────────────
 
-def plot_surface_mesh(recon: np.ndarray, save_dir: str, scratch: str):
+def plot_surface_mesh(recon: np.ndarray, save_dir: str, scratch: str, stem: str = "bae3d_surface_mesh"):
     fig = plt.figure(figsize=(10, 5))
     ax  = fig.add_subplot(111, projection="3d")
     surf = _draw_surface(ax, recon, "3D BAE — Reconstructed Wing Surface")
     fig.colorbar(surf, ax=ax, shrink=0.45, pad=0.08, aspect=20,
                  label="y/c  (surface height)")
-    _save(fig, save_dir, scratch, "bae3d_surface_mesh")
+    _save(fig, save_dir, scratch, stem)
     plt.close()
 
 
 # ── Figure 3: GT vs reconstruction side-by-side ───────────────────────────────
 
 def plot_gt_vs_recon(gt: np.ndarray, recon: np.ndarray,
-                     save_dir: str, scratch: str):
+                     save_dir: str, scratch: str, stem: str = "bae3d_gt_vs_recon"):
     fig = plt.figure(figsize=(16, 5))
     ax_gt    = fig.add_subplot(121, projection="3d")
     ax_recon = fig.add_subplot(122, projection="3d")
@@ -175,7 +175,7 @@ def plot_gt_vs_recon(gt: np.ndarray, recon: np.ndarray,
                  aspect=25, label="y/c  (surface height)")
     fig.suptitle("3D BAE — Ground Truth vs. Reconstruction",
                  fontsize=12, y=1.01)
-    _save(fig, save_dir, scratch, "bae3d_gt_vs_recon")
+    _save(fig, save_dir, scratch, stem)
     plt.close()
 
 
@@ -183,6 +183,8 @@ def plot_gt_vs_recon(gt: np.ndarray, recon: np.ndarray,
 
 def plot_rotating_gifs(gt: np.ndarray, recon: np.ndarray,
                        save_dir: str, scratch: str,
+                       stem_mesh: str = "bae3d_surface_mesh_rotating",
+                       stem_gtrecon: str = "bae3d_gt_vs_recon_rotating",
                        n_frames: int = 36, fps: int = 12):
     """36 frames at 12fps = 3s loop, much lower memory than 72@20."""
     azimuths = np.linspace(0, 360, n_frames, endpoint=False)
@@ -203,7 +205,7 @@ def plot_rotating_gifs(gt: np.ndarray, recon: np.ndarray,
     ani1 = FuncAnimation(fig1, update1, frames=n_frames,
                          interval=1000 // fps, blit=False)
     for base in (save_dir, scratch):
-        path = os.path.join(base, "bae3d_surface_mesh_rotating.gif")
+        path = os.path.join(base, f"{stem_mesh}.gif")
         ani1.save(path, writer="pillow", fps=fps, dpi=80)
         print(f"Saved: {path}")
     plt.close(fig1)
@@ -227,7 +229,7 @@ def plot_rotating_gifs(gt: np.ndarray, recon: np.ndarray,
     ani2 = FuncAnimation(fig2, update2, frames=n_frames,
                          interval=1000 // fps, blit=False)
     for base in (save_dir, scratch):
-        path = os.path.join(base, "bae3d_gt_vs_recon_rotating.gif")
+        path = os.path.join(base, f"{stem_gtrecon}.gif")
         ani2.save(path, writer="pillow", fps=fps, dpi=80)
         print(f"Saved: {path}")
     plt.close(fig2)
@@ -240,7 +242,7 @@ def parse_args():
     p.add_argument("--checkpoint",
                    default="results/bezier_ae_3d/run_039/models/bezier_ae_3d_best.pt")
     p.add_argument("--run_dir", default="results/bezier_ae_3d/run_039")
-    p.add_argument("--wing_idx", type=int, default=0)
+    p.add_argument("--wing_indices", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     return p.parse_args()
 
 
@@ -276,21 +278,28 @@ def main():
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
-    print(f"Loaded run_039 (latent_dim={ckpt['latent_dim']}, n_spans={ckpt['n_spans']})")
+    print(f"Loaded checkpoint (latent_dim={ckpt['latent_dim']}, n_spans={ckpt['n_spans']})")
 
-    with torch.no_grad():
-        x = val_dataset[args.wing_idx].unsqueeze(0).to(device)
-        z = model.encode(x)
-        y, _ = model.decode(z, return_cp=True)
+    for wing_idx in args.wing_indices:
+        print(f"\n── Wing {wing_idx} ──")
+        with torch.no_grad():
+            x = val_dataset[wing_idx].unsqueeze(0).to(device)
+            z = model.encode(x)
+            y, _ = model.decode(z, return_cp=True)
 
-    gt    = x.squeeze(0).cpu().numpy()
-    recon = y.squeeze(0).cpu().numpy()
-    print(f"Wing {args.wing_idx}: shape {recon.shape}")
+        gt    = x.squeeze(0).cpu().numpy()
+        recon = y.squeeze(0).cpu().numpy()
+        print(f"  shape {recon.shape}")
 
-    plot_exploded_view(recon, save_dir, scratch)
-    plot_surface_mesh(recon, save_dir, scratch)
-    plot_gt_vs_recon(gt, recon, save_dir, scratch)
-    plot_rotating_gifs(gt, recon, save_dir, scratch)
+        sfx = f"_wing{wing_idx:02d}"
+        plot_exploded_view(recon, save_dir, scratch, stem=f"bae3d_exploded_view{sfx}")
+        plot_surface_mesh(recon, save_dir, scratch, stem=f"bae3d_surface_mesh{sfx}")
+        plot_gt_vs_recon(gt, recon, save_dir, scratch, stem=f"bae3d_gt_vs_recon{sfx}")
+        plot_rotating_gifs(
+            gt, recon, save_dir, scratch,
+            stem_mesh=f"bae3d_surface_mesh_rotating{sfx}",
+            stem_gtrecon=f"bae3d_gt_vs_recon_rotating{sfx}",
+        )
 
     print(f"\nDone. All files in {save_dir}")
 

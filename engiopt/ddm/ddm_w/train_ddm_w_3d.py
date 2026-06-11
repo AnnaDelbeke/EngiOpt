@@ -359,6 +359,8 @@ def parse_args():
     p.add_argument("--seed",        type=int, default=0)
     p.add_argument("--n_samples",   type=int, default=None,
                    help="Ablation: number of training samples to use (default: all)")
+    p.add_argument("--save_dir",    type=str, default=None,
+                   help="Override output directory (default: derived from n_samples/seed)")
     p.add_argument("--wandb",       action="store_true")
     p.add_argument("--wandb_project", type=str, default="engiopt-ddm-w-3d")
     return p.parse_args()
@@ -383,6 +385,8 @@ def main():
     if args.n_samples is not None:
         cfg.model_name = f"ddm_w_3d_ablation_n{args.n_samples}_s{args.seed}"
         cfg.save_dir   = f"results/ddm_w_3d_ablation/n{args.n_samples}_s{args.seed}"
+    if args.save_dir is not None:
+        cfg.save_dir = args.save_dir
 
     torch.manual_seed(cfg.seed)
     os.makedirs(cfg.save_dir, exist_ok=True)

@@ -111,7 +111,8 @@ def compute_vendi(samples, gamma):
 
 def compute_metrics(generated, gt_airfoils, gen_aoas, gt_aoas,
                     gen_pressures=None, gt_pressures=None,
-                    gen_w=None, gt_w=None):
+                    gen_w=None, gt_w=None,
+                    gen_z=None, gt_z=None):
     n_slices  = generated.shape[1]
     shape_mse = 0.0
     mmd_vals, vendi_gen_vals, vendi_gt_vals = [], [], []
@@ -138,6 +139,9 @@ def compute_metrics(generated, gt_airfoils, gen_aoas, gt_aoas,
         out["pressure_mse"] = ((gen_pressures - gt_pressures) ** 2).mean().item()
     if gen_w is not None and gt_w is not None:
         out["mmd_w"] = float(np.mean([compute_mmd(gen_w, gt_w, g) for g in GAMMAS]))
+    if gen_z is not None and gt_z is not None:
+        out["z_bae_mse"] = ((gen_z - gt_z) ** 2).mean().item()
+        out["mmd_z"] = float(np.mean([compute_mmd(gen_z, gt_z, g) for g in GAMMAS]))
 
     return out
 
@@ -165,6 +169,7 @@ def precompute_test_3d(test_dataset, initial_by_case, bae_model, lvae_model,
     gt_aoas_list      = []
     gt_pressures_list = []
     gt_w_list         = []
+    gt_z_list         = []
     w_inits_list      = []
     params_list       = []
     case_nums_list    = []
@@ -196,6 +201,7 @@ def precompute_test_3d(test_dataset, initial_by_case, bae_model, lvae_model,
             gt_coords_list.append(gt_recon)
             gt_pressures_list.append(pressure)
             gt_aoas_list.append(torch.tensor(float(item["alpha"])))
+            gt_z_list.append(z_bae.squeeze(0).cpu())
 
             flow    = [item["mach"], item["reynolds"], item["cl_target"], item["area_case_ratio"]]
             flow_np = np.array(flow, dtype=np.float32).reshape(1, -1)
@@ -252,6 +258,7 @@ def precompute_test_3d(test_dataset, initial_by_case, bae_model, lvae_model,
         torch.stack(gt_aoas_list),      # [N]
         torch.stack(gt_pressures_list), # [N, S, 192]
         torch.stack(gt_w_list),         # [N, w_dim]
+        torch.stack(gt_z_list),         # [N, bae_latent_dim]
         torch.stack(w_inits_list),      # [N, w_dim]
         torch.stack(params_list),       # [N, c_dim]
         case_nums_list,
@@ -336,7 +343,7 @@ def main():
         [float(item["area_case_ratio"]) for item in test_dataset], dtype=torch.float32
     )
 
-    gt_coords, gt_aoas, gt_pressures, gt_w, w_inits, params_norm, case_nums = \
+    gt_coords, gt_aoas, gt_pressures, gt_w, gt_z, w_inits, params_norm, case_nums = \
         precompute_test_3d(
             test_dataset, initial_by_case, bae_model, lvae_model,
             w_mean, w_std, scaler_params, scaler_aoas, device,
@@ -344,9 +351,9 @@ def main():
     N = gt_coords.shape[0]
     print(f"Pre-computed GT for {N} test wings.")
 
-    all_coords, all_aoas, all_pressures, all_w = [], [], [], []
+    all_coords, all_aoas, all_pressures, all_w, all_z = [], [], [], [], []
     for pass_i in range(args.n_passes):
-        coords_p, aoas_p, pres_p, _, w_p = ddm_w.generate(
+        coords_p, aoas_p, pres_p, _, w_p, z_p = ddm_w.generate(
             w_init=w_inits.to(device),
             params=params_norm.to(device),
             device=device,
@@ -356,20 +363,23 @@ def main():
         all_aoas.append(aoas_p)
         all_pressures.append(pres_p)
         all_w.append(w_p)
+        all_z.append(z_p)
         print(f"  Pass {pass_i+1}/{args.n_passes} done.")
 
     gen_coords    = torch.stack(all_coords,    dim=0).mean(0)
     gen_aoas      = torch.stack(all_aoas,      dim=0).mean(0)
     gen_pressures = torch.stack(all_pressures, dim=0).mean(0)
+    gen_z         = torch.stack(all_z,         dim=0).mean(0)
 
     # For MMD we want the full sample cloud (all passes), not the per-sample mean
-    gen_w_all = torch.cat(all_w, dim=0)   # [N * n_passes, w_dim]
+    gen_w_all = torch.cat(all_w, dim=0)        # [N * n_passes, w_dim]
     gt_w_all  = gt_w.repeat(args.n_passes, 1)  # match cardinality
 
     metrics = compute_metrics(
         gen_coords, gt_coords, gen_aoas, gt_aoas,
         gen_pressures, gt_pressures,
         gen_w=gen_w_all, gt_w=gt_w_all,
+        gen_z=gen_z, gt_z=gt_z,
     )
     metrics.update(compute_volume_metrics(gen_coords, gt_coords, area_case_ratios))
 

@@ -170,6 +170,39 @@ def plot_tsne_comparison(lvae_emb: np.ndarray,
     print(f"t-SNE plot saved to {save_path}")
 
 
+def plot_tsne_regime(lvae_emb: np.ndarray,
+                     pca_emb: np.ndarray,
+                     machs: np.ndarray,
+                     save_path: str,
+                     model_name: str = ""):
+    """Two-panel scatter colored by Mach regime: LVAE (left) | PCA (right)."""
+    regime_colors = np.where(machs < 0.8, 0, np.where(machs < 1.0, 1, 2)).astype(int)
+    palette = ["steelblue", "darkorange", "firebrick"]
+    labels  = ["Subsonic (M<0.8)", "Transonic (0.8-1.0)", "Supersonic (M≥1.0)"]
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    for ax, emb, title in zip(axes, [lvae_emb, pca_emb], ["LVAE latents", "PCA latents"]):
+        for regime_idx in range(3):
+            mask = regime_colors == regime_idx
+            if mask.any():
+                ax.scatter(emb[mask, 0], emb[mask, 1],
+                           color=palette[regime_idx], label=labels[regime_idx],
+                           s=22, alpha=0.75, edgecolors="none")
+        ax.set_title(title, fontsize=11)
+        ax.set_xlabel("t-SNE 1")
+        ax.legend(fontsize=8, markerscale=1.2)
+    axes[0].set_ylabel("t-SNE 2")
+
+    suptitle = "t-SNE colored by Mach regime"
+    if model_name:
+        suptitle += f"  [{model_name}]"
+    fig.suptitle(suptitle, fontsize=11, y=1.01)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"t-SNE regime plot saved to {save_path}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -224,12 +257,17 @@ def main():
         perplexity=args.perplexity, seed=args.seed,
     )
 
-    # 5. Save plot
+    # 5. Save plots
     os.makedirs(args.save_dir, exist_ok=True)
     model_name = os.path.splitext(os.path.basename(args.checkpoint))[0]
     save_path  = os.path.join(args.save_dir, f"tsne_latent_{model_name}.png")
     plot_tsne_comparison(lvae_emb, pca_emb, prior_emb,
                          save_path=save_path, model_name=model_name)
+
+    machs = np.array([it["mach"] for it in test_items])
+    regime_path = os.path.join(args.save_dir, f"tsne_regime_{model_name}.png")
+    plot_tsne_regime(lvae_emb, pca_emb, machs,
+                     save_path=regime_path, model_name=model_name)
 
 
 if __name__ == "__main__":

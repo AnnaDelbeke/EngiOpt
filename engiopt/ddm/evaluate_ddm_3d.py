@@ -59,7 +59,8 @@ def compute_vendi(samples, gamma):
     return (-(ev * ev.log()).sum()).exp().item()
 
 
-def compute_metrics(gen_coords, gt_coords, gen_aoas, gt_aoas):
+def compute_metrics(gen_coords, gt_coords, gen_aoas, gt_aoas,
+                    gen_z=None, gt_z=None):
     n_slices  = gen_coords.shape[1]
     shape_mse = 0.0
     mmd_vals, vendi_gen_vals, vendi_gt_vals = [], [], []
@@ -80,7 +81,11 @@ def compute_metrics(gen_coords, gt_coords, gen_aoas, gt_aoas):
     vendi_norm = float(np.mean(vendi_gen_vals)) / vendi_gt if vendi_gt > 0 else 0.0
     aoa_mse    = ((gen_aoas - gt_aoas) ** 2).mean().item()
 
-    return {"shape_mse": shape_mse, "aoa_mse": aoa_mse, "mmd": mmd, "vendi": vendi_norm}
+    out = {"shape_mse": shape_mse, "aoa_mse": aoa_mse, "mmd": mmd, "vendi": vendi_norm}
+    if gen_z is not None and gt_z is not None:
+        out["z_bae_mse"] = ((gen_z - gt_z) ** 2).mean().item()
+        out["mmd_z"] = float(np.mean([compute_mmd(gen_z, gt_z, g) for g in GAMMAS]))
+    return out
 
 
 @torch.no_grad()
@@ -135,7 +140,7 @@ def generate(model: DDM3D, z_inits: torch.Tensor, params: torch.Tensor,
     else:
         aoa_out = aoa_noisy.cpu()
 
-    return coords, aoa_out
+    return coords, aoa_out, z_raw.cpu()
 
 
 def parse_args():
@@ -155,8 +160,7 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.out_dir, exist_ok=True)
 
-    bae_model = load_bae_3d(args.bae_checkpoint, device,
-                             latent_dim=64, n_spans=15)
+    bae_model = load_bae_3d(args.bae_checkpoint, device, n_spans=15)
 
     # Load checkpoint
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
@@ -217,20 +221,26 @@ def main():
     N = gt_coords.shape[0]
     print(f"Generating {args.n_passes} passes for {N} wings...")
 
-    all_coords, all_aoas = [], []
+    all_coords, all_aoas, all_z = [], [], []
     for pass_i in range(args.n_passes):
-        coords_p, aoas_p = generate(model, z_inits_n, params_n, device, T=args.T)
+        coords_p, aoas_p, z_p = generate(model, z_inits_n, params_n, device, T=args.T)
         all_coords.append(coords_p)
         all_aoas.append(aoas_p)
+        all_z.append(z_p)
         print(f"  Pass {pass_i+1}/{args.n_passes} done.")
 
     gen_coords = torch.stack(all_coords, dim=0).mean(0)  # [N, S, 2, 192]
     gen_aoas   = torch.stack(all_aoas,   dim=0).mean(0)  # [N, 1]
+    gen_z      = torch.stack(all_z,      dim=0).mean(0)  # [N, z_dim]
 
-    gt_aoas_t = aoas_gt if aoas_gt.dim() == 1 else aoas_gt.squeeze(1)
+    gt_aoas_t  = aoas_gt if aoas_gt.dim() == 1 else aoas_gt.squeeze(1)
     gen_aoas_t = gen_aoas.squeeze(1) if gen_aoas.dim() == 2 else gen_aoas
 
-    metrics = compute_metrics(gen_coords, gt_coords, gen_aoas_t, gt_aoas_t)
+    # GT z (unnormalised BAE latents)
+    gt_z = z_gt.to(gen_z.device)
+
+    metrics = compute_metrics(gen_coords, gt_coords, gen_aoas_t, gt_aoas_t,
+                              gen_z=gen_z, gt_z=gt_z)
 
     print("\n=== DDM-3D Evaluation Results ===")
     for k, v in metrics.items():

@@ -381,7 +381,7 @@ def main():
 
     # ── Load BAE ──────────────────────────────────────────────────────────────
     from engiopt.ddm.train_ddm_3d import load_bae_3d
-    bae_model = load_bae_3d(args.bae_checkpoint, device, latent_dim=64, n_spans=15)
+    bae_model = load_bae_3d(args.bae_checkpoint, device, n_spans=15)
     bae_model.eval()
 
     # ── Load model ────────────────────────────────────────────────────────────
