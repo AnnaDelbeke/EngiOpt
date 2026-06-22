@@ -7,6 +7,7 @@ Differences from train_bezier_ae.py:
   - Saves to results/bezier_ae_3d/ so it never overwrites the 2D BAE checkpoint
 """
 
+import argparse
 import os
 import csv
 import matplotlib.pyplot as plt
@@ -225,14 +226,35 @@ def train_one_config(
     return best_val_loss, best_epoch, run_dir
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train BezierAutoencoder3D")
+    parser.add_argument("--slices_pkl",  type=str, default=_SLICES_PKL,
+                        help="Path to processed slices pickle")
+    parser.add_argument("--scalars_pkl", type=str, default=_SCALARS_PKL,
+                        help="Path to processed scalars pickle")
+    parser.add_argument("--n_control_points", type=int, default=32)
+    parser.add_argument("--latent_dim",       type=int, default=64)
+    parser.add_argument("--batch_size",       type=int, default=16)
+    parser.add_argument("--n_epochs",         type=int, default=2000)
+    parser.add_argument("--learning_rate",    type=float, default=1e-3)
+    parser.add_argument("--reg_weight",       type=float, default=0.001)
+    parser.add_argument("--results_dir",      type=str, default="results/bezier_ae_3d",
+                        help="Base directory for run outputs")
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
+    print(f"Slices:  {args.slices_pkl}")
+    print(f"Scalars: {args.scalars_pkl}")
 
-    run_dir = make_next_run_dir()
+    run_dir = make_next_run_dir(args.results_dir)
     print(f"Outputs → {run_dir}")
 
-    new_dataset  = NewWingsDataset(_SLICES_PKL, _SCALARS_PKL, seed=0)
+    new_dataset  = NewWingsDataset(args.slices_pkl, args.scalars_pkl, seed=0)
     all_items    = [item for item in list(new_dataset["train"]) + list(new_dataset["val"])
                     if item["final"] == 1]
     full_dataset = WingsBezierDataset3D(all_items)
@@ -249,7 +271,12 @@ def main():
 
     train_one_config(
         train_ds, val_ds, n_spans,
-        n_control_points=32,
+        n_control_points=args.n_control_points,
+        latent_dim=args.latent_dim,
+        batch_size=args.batch_size,
+        reg_weight=args.reg_weight,
+        learning_rate=args.learning_rate,
+        n_epochs=args.n_epochs,
         device=device,
         run_dir=run_dir,
     )

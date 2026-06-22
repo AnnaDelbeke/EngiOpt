@@ -83,7 +83,14 @@ def compute_metrics(generated, gt_airfoils, gen_aoas, gt_aoas, gen_z=None, gt_z=
     vendi_norm = float(np.mean(vendi_gen_vals)) / vendi_gt if vendi_gt > 0 else 0.0
     aoa_mse    = ((gen_aoas - gt_aoas) ** 2).mean().item()
 
-    out = {"shape_mse": shape_mse, "aoa_mse": aoa_mse, "mmd": mmd, "vendi": vendi_norm}
+    # Shape R²
+    gen_flat_all = generated.reshape(generated.shape[0], -1)
+    gt_flat_all  = gt_airfoils.reshape(gt_airfoils.shape[0], -1)
+    ss_res = ((gen_flat_all - gt_flat_all) ** 2).sum().item()
+    ss_tot = ((gt_flat_all  - gt_flat_all.mean(0, keepdim=True)) ** 2).sum().item()
+    shape_r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+
+    out = {"shape_mse": shape_mse, "shape_r2": shape_r2, "aoa_mse": aoa_mse, "mmd": mmd, "vendi": vendi_norm}
     if gen_z is not None and gt_z is not None:
         out["mmd_z"] = float(np.mean([compute_mmd(gen_z, gt_z, g) for g in GAMMAS]))
     return out

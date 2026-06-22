@@ -175,29 +175,44 @@ def plot_tsne_regime(lvae_emb: np.ndarray,
                      machs: np.ndarray,
                      save_path: str,
                      model_name: str = ""):
-    """Two-panel scatter colored by Mach regime: LVAE (left) | PCA (right)."""
-    regime_colors = np.where(machs < 0.8, 0, np.where(machs < 1.0, 1, 2)).astype(int)
-    palette = ["steelblue", "darkorange", "firebrick"]
-    labels  = ["Subsonic (M<0.8)", "Transonic (0.8-1.0)", "Supersonic (M≥1.0)"]
+    """Two-panel scatter colored by continuous Mach number: LVAE (left) | PCA (right)."""
+    import matplotlib.cm as cm
+    import matplotlib.colors as mcolors
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    for ax, emb, title in zip(axes, [lvae_emb, pca_emb], ["LVAE latents", "PCA latents"]):
-        for regime_idx in range(3):
-            mask = regime_colors == regime_idx
-            if mask.any():
-                ax.scatter(emb[mask, 0], emb[mask, 1],
-                           color=palette[regime_idx], label=labels[regime_idx],
-                           s=22, alpha=0.75, edgecolors="none")
-        ax.set_title(title, fontsize=11)
-        ax.set_xlabel("t-SNE 1")
-        ax.legend(fontsize=8, markerscale=1.2)
-    axes[0].set_ylabel("t-SNE 2")
+    # Continuous colormap: blue (subsonic) → orange (transonic) → red (supersonic)
+    cmap   = cm.coolwarm
+    norm   = mcolors.Normalize(vmin=machs.min(), vmax=machs.max())
+    colors = cmap(norm(machs))
 
-    suptitle = "t-SNE colored by Mach regime"
-    if model_name:
-        suptitle += f"  [{model_name}]"
-    fig.suptitle(suptitle, fontsize=11, y=1.01)
-    fig.tight_layout()
+    all_x = np.concatenate([lvae_emb[:, 0], pca_emb[:, 0]])
+    all_y = np.concatenate([lvae_emb[:, 1], pca_emb[:, 1]])
+    pad = 0.05
+    x_margin = (all_x.max() - all_x.min()) * pad
+    y_margin = (all_y.max() - all_y.min()) * pad
+    xlim = (all_x.min() - x_margin, all_x.max() + x_margin)
+    ylim = (all_y.min() - y_margin, all_y.max() + y_margin)
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    labels = ["(a)", "(b)"]
+    for ax, emb, label in zip(axes, [lvae_emb, pca_emb], labels):
+        sc = ax.scatter(emb[:, 0], emb[:, 1], c=machs,
+                        cmap=cmap, norm=norm,
+                        s=22, alpha=0.80, edgecolors="none")
+        ax.set_xlim(xlim)
+        ax.set_ylim(ylim)
+        ax.set_xlabel("t-SNE 1", fontsize=9)
+        ax.tick_params(labelsize=8)
+        ax.annotate(label, xy=(0, 1), xycoords="axes fraction",
+                    xytext=(-2, 10), textcoords="offset points",
+                    fontsize=11, fontweight="bold", ha="right", va="bottom")
+    axes[0].set_ylabel("t-SNE 2", fontsize=9)
+
+    # Single shared colorbar to the right of both panels, same height as axes
+    cbar = fig.colorbar(sc, ax=axes[1], orientation="vertical", fraction=0.046, pad=0.04, shrink=1.0)
+    cbar.set_label("Mach number", fontsize=18)
+    cbar.ax.tick_params(labelsize=16)
+
+    fig.subplots_adjust(left=0.07, right=0.88, top=0.95, bottom=0.12)
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"t-SNE regime plot saved to {save_path}")

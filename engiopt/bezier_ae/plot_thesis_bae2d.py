@@ -39,7 +39,7 @@ COL_GT    = "#2166ac"
 COL_RECON = "#d6604d"
 COL_CP    = "#4dac26"
 
-N_SLICES  = 9   # Dataset 1 has 9 slices per wing
+N_SLICES  = 9   # Optiwing3D has 9 slices per wing
 
 
 @torch.no_grad()

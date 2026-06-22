@@ -161,11 +161,13 @@ class LAEDecoder3D(nn.Module):
                  dropout: float = 0.0,
                  use_perf_head: bool = True,
                  span_embed_dim: int = 8,
-                 spectral_norm: bool = False):
+                 spectral_norm: bool = False,
+                 use_pressure: bool = True):
         super().__init__()
         self.bae_latent_dim  = bae_latent_dim
         self.n_spans         = n_spans
         self.pressure_length = pressure_length
+        self.use_pressure    = use_pressure
         _sn = sn if spectral_norm else (lambda x: x)
 
         dims = [lae_latent_dim + c_dim] + hidden_dims
@@ -182,12 +184,15 @@ class LAEDecoder3D(nn.Module):
         self.aoa_head   = _sn(nn.Linear(h, 1))
         self.eta_y_head = _sn(nn.Linear(h, n_spans))
         self.perf_head  = _sn(nn.Linear(h, 2)) if use_perf_head else None
-        self.pressure_head = nn.Sequential(
-            _sn(nn.Linear(h, 512)),
-            nn.GELU(),
-            nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
-            _sn(nn.Linear(512, n_spans * pressure_length)),
-        )
+        if use_pressure:
+            self.pressure_head = nn.Sequential(
+                _sn(nn.Linear(h, 512)),
+                nn.GELU(),
+                nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
+                _sn(nn.Linear(512, n_spans * pressure_length)),
+            )
+        else:
+            self.pressure_head = None
 
     def forward(self, w: torch.Tensor, params: torch.Tensor):
         """
@@ -206,7 +211,8 @@ class LAEDecoder3D(nn.Module):
         z_bae_pred    = self.bae_head(h)
         aoa_pred      = self.aoa_head(h)
         eta_y_pred    = self.eta_y_head(h).reshape(B, self.n_spans, 1)
-        pressure_pred = self.pressure_head(h).reshape(B, self.n_spans, self.pressure_length)
+        pressure_pred = (self.pressure_head(h).reshape(B, self.n_spans, self.pressure_length)
+                         if self.use_pressure else None)
         perf_pred     = self.perf_head(h) if self.perf_head is not None else None
 
         return z_bae_pred, aoa_pred, eta_y_pred, pressure_pred, perf_pred
@@ -296,7 +302,9 @@ class LVAE3D(nn.Module):
         loss_bae      = nn.functional.mse_loss(z_bae_pred, z_bae)
         loss_aoa      = nn.functional.mse_loss(aoa_pred, aoa)
         loss_eta      = nn.functional.mse_loss(eta_y_pred, eta_y)
-        loss_pressure = nn.functional.mse_loss(pressure_pred, pressure)
+        loss_pressure = (nn.functional.mse_loss(pressure_pred, pressure)
+                         if pressure_pred is not None
+                         else torch.zeros(1, device=device))
         loss_perf = (nn.functional.mse_loss(perf_pred, perf)
                      if perf_pred is not None
                      else torch.zeros(1, device=device))
@@ -337,6 +345,7 @@ class LVAE3D(nn.Module):
             'span_embed_dim':       None,
             'point_embed':          False,
             'joint_encoder':        isinstance(self.encoder, LAEEncoderJoint3D),
+            'use_pressure':         getattr(self.decoder, 'use_pressure', True),
             'lae_latent_dim':       self.lae_latent_dim,
             'bae_latent_dim':       self.decoder.bae_latent_dim,
             'dropout':              getattr(self.encoder, 'dropout_p', 0.0),
@@ -520,6 +529,9 @@ def parse_args():
     p.add_argument("--w_perf",      type=float, default=1.0)
     p.add_argument("--joint_encoder",     action="store_true",
                    help="Use LAEEncoderJoint3D (pressure pre-encoder) instead of geometry-only")
+    p.add_argument("--no_pressure",       action="store_true",
+                   help="Remove pressure head from decoder and force geometry-only encoder "
+                        "(overrides --joint_encoder). Trains geometry-only with all other v29 settings.")
     p.add_argument("--pressure_embed_dim", type=int, default=16,
                    help="Per-span pressure embedding dim (only used with --joint_encoder)")
     p.add_argument("--dropout",          type=float, default=0.0)
@@ -527,6 +539,8 @@ def parse_args():
     p.add_argument("--prune_threshold",  type=float, default=0.02)
     p.add_argument("--decoder_frob_max", type=float, default=0.0,
                    help="Hard Frobenius norm ceiling per decoder weight matrix (0=disabled)")
+    p.add_argument("--n_samples",         type=int,   default=0,
+                   help="Subsample training set to this many wings (0 = use all)")
     p.add_argument("--save_dir",         type=str,   default="results/lvae_3d")
     p.add_argument("--seed",        type=int, default=0)
     p.add_argument("--wandb",       action="store_true")
@@ -552,6 +566,10 @@ def main():
     base_dataset    = [item for item in all_train if item["final"] == 1]
     all_val         = list(new_dataset["val"])
     val_dataset_raw = [item for item in all_val  if item["final"] == 1]
+    if args.n_samples > 0:
+        rng = np.random.default_rng(args.seed)
+        idx = rng.choice(len(base_dataset), size=min(args.n_samples, len(base_dataset)), replace=False)
+        base_dataset = [base_dataset[i] for i in sorted(idx)]
     print(f"Train: {len(base_dataset)}  Val: {len(val_dataset_raw)}")
 
     # 3. Normalisation stats
@@ -598,7 +616,16 @@ def main():
     # 5. Build model
     n_spans = eta_ys.shape[1]
     pressure_length = pressures.shape[2]  # 192
-    if args.joint_encoder:
+    use_pressure = not args.no_pressure
+    if args.no_pressure:
+        # --no_pressure forces geometry-only encoder regardless of --joint_encoder
+        encoder = LAEEncoder3D(
+            bae_latent_dim=args.bae_latent_dim, c_dim=4,
+            n_spans=n_spans, pressure_length=pressure_length,
+            lae_latent_dim=args.lae_latent_dim, dropout=args.dropout,
+        ).to(device)
+        print("=== NO_PRESSURE: geometry-only encoder, no pressure head in decoder ===")
+    elif args.joint_encoder:
         encoder = LAEEncoderJoint3D(
             bae_latent_dim=args.bae_latent_dim, c_dim=4,
             n_spans=n_spans, pressure_length=pressure_length,
@@ -618,6 +645,7 @@ def main():
         lae_latent_dim=args.lae_latent_dim, n_spans=n_spans,
         dropout=args.dropout,
         spectral_norm=(args.lambda_lv > 0),
+        use_pressure=use_pressure,
     ).to(device)
 
     model = LVAE3D(

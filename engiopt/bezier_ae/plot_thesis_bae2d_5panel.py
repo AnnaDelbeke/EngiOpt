@@ -66,48 +66,70 @@ def plot_5panel(val_dataset, model, device, run_dir, wing_indices):
             cp[0, 0].cpu().numpy(), cp[0, 1].cpu().numpy(),
         ))
 
-    # Shared y-limits: based on GT + reconstruction across ALL panels
-    all_y = np.concatenate([r[1] for r in results] + [r[3] for r in results])
+    # Shared y-limits: based on GT + reconstruction + control points across ALL panels
+    # so every control point stays inside the plotted area
+    all_y = np.concatenate([r[1] for r in results] + [r[3] for r in results] + [r[5] for r in results])
+    all_x = np.concatenate([r[0] for r in results] + [r[2] for r in results] + [r[4] for r in results])
     y_margin = 0.05
     y_lo = all_y.min() - y_margin
     y_hi = all_y.max() + y_margin
-    x_lo, x_hi = -0.02, 1.05
+    x_lo = min(-0.02, all_x.min() - y_margin)
+    x_hi = max(1.05, all_x.max() + y_margin)
 
-    n = len(results)
-    fig, axes = plt.subplots(
-        1, n,
-        figsize=(2.6 * n, 2.6),
-        sharey=True,          # ← shared y-axis, uniform scale across panels
-        constrained_layout=True,
-    )
+    # 1x4 horizontal layout with equal aspect panels
+    x_range = x_hi - x_lo
+    y_range = y_hi - y_lo
+    aspect = y_range / x_range
 
-    for col, ((gt_x, gt_y, recon_x, recon_y, cp_x, cp_y), ax) in \
-            enumerate(zip(results, axes)):
+    fig_w    = 8.0
+    leg_h    = 0.30   # fraction reserved at bottom for legend
+    gap_x    = 0.04
+    margin_l = 0.07
+    margin_r = 0.01
+    margin_t = 0.02
 
-        ax.plot(gt_x,    gt_y,    color=COL_GT,    lw=1.8, label="Ground truth", zorder=3)
-        ax.plot(recon_x, recon_y, color=COL_RECON, lw=1.8, ls="--", label="Prediction", zorder=3)
-        ax.plot(cp_x,    cp_y,    color=COL_CP,    lw=0.9, ls="--",
-                marker="o", markersize=3.5, alpha=0.8, label="Control polygon", zorder=2)
+    ax_w = (1 - margin_l - margin_r - 2 * gap_x) / 3
+    panel_w_in = ax_w * fig_w
+    panel_h_in = panel_w_in * aspect
+    fig_h = (panel_h_in / fig_w + leg_h + margin_t) * fig_w
+    ax_h = panel_h_in / fig_h
+
+    positions = [
+        [margin_l + i * (ax_w + gap_x), leg_h, ax_w, ax_h]
+        for i in range(3)
+    ]
+
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    axes_flat = [fig.add_axes(pos) for pos in positions]
+
+    for idx, ((gt_x, gt_y, recon_x, recon_y, cp_x, cp_y), ax) in \
+            enumerate(zip(results, axes_flat)):
+
+        ax.plot(gt_x,    gt_y,    color=COL_GT,    lw=1.2, label="Ground truth", zorder=3)
+        ax.plot(recon_x, recon_y, color=COL_RECON, lw=1.2, ls="--", label="Reconstruction", zorder=3)
+        ax.plot(cp_x,    cp_y,    color=COL_CP,    lw=0.6, ls="--",
+                marker="o", markersize=2.5, alpha=0.8, label="Control polygon", zorder=2)
 
         ax.set_xlim(x_lo, x_hi)
         ax.set_ylim(y_lo, y_hi)
-        ax.set_title(f"({chr(ord('a') + col)}) Example {col + 1}", pad=3)
+        ax.set_aspect("equal")
         ax.set_xlabel("x/c")
         ax.xaxis.set_major_locator(ticker.MultipleLocator(0.5))
         ax.xaxis.set_minor_locator(ticker.MultipleLocator(0.25))
-        ax.set_aspect("equal")
 
         for spine in ax.spines.values():
             spine.set_linewidth(0.5)
 
-        if col == 0:
+        if idx == 0:
             ax.set_ylabel("y/c")
+        else:
+            ax.tick_params(labelleft=False)
 
-    # Shared legend below the panels
-    handles, labels = axes[0].get_legend_handles_labels()
+    handles, labels = axes_flat[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center",
-               ncol=3, framealpha=0.9, handlelength=1.8,
-               bbox_to_anchor=(0.5, -0.08))
+               ncol=3, framealpha=0.9, handlelength=1.2, fontsize=9,
+               bbox_to_anchor=(0.5, 0.05), borderpad=0.6,
+               columnspacing=1.0)
 
     save_dir = os.path.join(run_dir, "reconstructions_thesis")
     os.makedirs(save_dir, exist_ok=True)
@@ -131,7 +153,7 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", default="results/bezier_ae/run_006/models/bezier_ae_best.pt")
     p.add_argument("--run_dir",    default="results/bezier_ae/run_006")
-    p.add_argument("--wing_indices", type=int, nargs="+", default=[0, 5, 10, 20, 30])
+    p.add_argument("--wing_indices", type=int, nargs="+", default=[0, 5, 10])
     return p.parse_args()
 
 

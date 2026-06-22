@@ -238,6 +238,20 @@ def train_one_epoch(ddm_model: DDM_AoAInit_3D, loader: DataLoader,
     return total_loss / max(len(loader), 1)
 
 
+def eval_one_epoch(ddm_model: DDM_AoAInit_3D, loader: DataLoader,
+                   device: str, epoch: int) -> float:
+    ddm_model.unet.eval()
+    total_loss = 0.0
+    with torch.no_grad():
+        for batch in loader:
+            batch = tuple(t.to(device) for t in batch)
+            batch_noised = ddm_model._noise_data(batch, device)
+            loss = ddm_model.loss(batch_noised, return_components=False)
+            total_loss += loss.item()
+    ddm_model.unet.train()
+    return total_loss / max(len(loader), 1)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -276,17 +290,24 @@ def main():
     problem = Wings3D(seed=cfg.seed)
     all_train = list(problem.dataset["train"])
     initial_by_case = {item["case_num"]: item for item in all_train if item["initial"] == 1}
-    base_dataset = [item for item in all_train if item["final"] == 1]
+    all_final = [item for item in all_train if item["final"] == 1]
+
+    # Carve out a val split (same 15% ratio as the 3D dataset, reproducible)
+    rng_split = np.random.default_rng(42)
+    n_val = max(1, int(0.15 * len(all_final)))
+    val_idx = set(rng_split.choice(len(all_final), size=n_val, replace=False).tolist())
+    base_dataset = [item for i, item in enumerate(all_final) if i not in val_idx]
+    val_dataset  = [item for i, item in enumerate(all_final) if i in val_idx]
+    val_initial_by_case = initial_by_case  # same initial cases cover val too
 
     # Subset the dataset if --n_samples is specified
     if args.n_samples is not None:
         rng = np.random.default_rng(cfg.seed)
         indices = rng.choice(len(base_dataset), size=args.n_samples, replace=False)
         base_dataset = [base_dataset[i] for i in sorted(indices)]
-        print(f"Ablation: using {args.n_samples} of {len(all_train)} training samples (seed={args.seed})")
+        print(f"Ablation: using {args.n_samples} of {len(all_final)} training samples (seed={args.seed})")
 
-    print(f"Loaded Wings3D train split: {len(base_dataset)} final items, "
-          f"{len(initial_by_case)} initial cases.")
+    print(f"Train: {len(base_dataset)}  Val: {len(val_dataset)}")
 
     # 3) Compute normalisation stats
     all_params = np.array([
@@ -336,6 +357,20 @@ def main():
         num_workers=cfg.num_workers,
     )
 
+    # 4b) Pre-compute val latents (use train normalisation stats)
+    z_val, aoas_val, params_val, z_inits_val = precompute_latents(
+        val_dataset, val_initial_by_case, bae_model, cfg.device
+    )
+    z_val       = (z_val       - z_mean) / z_std
+    z_inits_val = (z_inits_val - z_mean[0]) / z_std[0]
+    val_ds = PrecomputedWingsDataset(
+        z_val, aoas_val, params_val, z_inits_val,
+        scaler_params=scaler_params,
+        scaler_aoas=scaler_aoas,
+    )
+    val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False,
+                            num_workers=cfg.num_workers)
+
     # 5) Build UNet
     unet = build_unet(cfg)
     print("Built UNet.")
@@ -380,10 +415,11 @@ def main():
 
     for epoch in range(cfg.n_epochs):
         train_loss = train_one_epoch(ddm_model, ddm_loader, cfg.device, epoch)
+        val_loss   = eval_one_epoch(ddm_model, val_loader, cfg.device, epoch)
 
         ddm_model.scheduler.step(train_loss)
 
-        print(f"Epoch {epoch + 1:05d}/{cfg.n_epochs} | Train Loss {train_loss:.6f}")
+        print(f"Epoch {epoch + 1:05d}/{cfg.n_epochs} | Train Loss {train_loss:.6f} | Val Loss {val_loss:.6f}")
 
         # Save periodically so you never lose more than save_every epochs of work
         if (epoch + 1) % cfg.save_every == 0:

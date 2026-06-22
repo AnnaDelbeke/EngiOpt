@@ -16,9 +16,8 @@ import matplotlib.ticker as ticker
 EVAL_DIR = "results/lvae_3d_evaluation"
 OUT_PATH = os.path.join(EVAL_DIR, "sweep_metrics.png")
 
-# version → lambda_lv mapping (add new versions here as they train)
+# version → lambda_lv mapping (v15 excluded: trained without spectral norm)
 VERSION_LAMBDA = {
-    "v15": 0.0,
     "v16": 1e-4,
     "v17": 1e-4,   # same lambda as v16, different frob; keep both
     "v18": 1e-3,
@@ -80,27 +79,15 @@ def plot(rows):
 
     rows.sort(key=lambda r: r["lambda"])
 
-    lambdas    = [r["lambda"]       for r in rows]
-    versions   = [r["version"]      for r in rows]
-    p_mse      = [r["pressure_mse"] for r in rows]
-    p_r2       = [r["pressure_r2"]  for r in rows]
-    s_mse      = [r["shape_mse"]    for r in rows]
-    s_r2       = [r["shape_r2"]     for r in rows]
-    aoa        = [r["aoa_mse"]      for r in rows]
-    lat_mmd    = [r["latent_mmd"]   for r in rows]
+    p_mse   = [r["pressure_mse"] for r in rows]
+    p_r2    = [r["pressure_r2"]  for r in rows]
+    s_mse   = [r["shape_mse"]    for r in rows]
+    aoa     = [r["aoa_mse"]      for r in rows]
 
-    # x-axis: use index positions with version labels (log-spacing is tricky with λ=0)
     xs = np.arange(len(rows))
+    xlabels = [f"{r['lambda']:.0e}" for r in rows]
 
-    fig, axes = plt.subplots(2, 3, figsize=(16, 9))
-    fig.suptitle("λ_lv sweep — LVAE3D metrics vs lambda", fontsize=14, fontweight="bold")
-
-    def fmt_lambda(lam):
-        if lam == 0.0:
-            return "0\n(v15)"
-        return f"{lam:.0e}"
-
-    xlabels = [f"{fmt_lambda(r['lambda'])}\n({r['version']})" for r in rows]
+    fig, axes = plt.subplots(2, 2, figsize=(12, 7))
 
     def bar_plot(ax, ys, title, ylabel, color, log=False):
         bars = ax.bar(xs, ys, color=color, alpha=0.8, edgecolor="k", linewidth=0.5)
@@ -111,16 +98,12 @@ def plot(rows):
         if log:
             ax.set_yscale("log")
         ax.grid(axis="y", alpha=0.3)
-        for bar, y in zip(bars, ys):
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
-                    f"{y:.3g}", ha="center", va="bottom", fontsize=6.5)
+        pass
 
-    bar_plot(axes[0, 0], p_mse,   "Pressure MSE ↓",       "MSE",  "#e07b54", log=True)
-    bar_plot(axes[0, 1], p_r2,    "Pressure R² ↑",        "R²",   "#5ba85b")
-    bar_plot(axes[0, 2], s_mse,   "Shape MSE ↓",          "MSE",  "#5b8dc8", log=True)
-    bar_plot(axes[1, 0], s_r2,    "Shape R² ↑",           "R²",   "#8b5bc8")
-    bar_plot(axes[1, 1], aoa,     "AoA MSE ↓",            "MSE",  "#c8a85b", log=True)
-    bar_plot(axes[1, 2], lat_mmd, "Latent MMD vs N(0,I) ↓","MMD", "#5bc8c8")
+    bar_plot(axes[0, 0], p_mse, "Pressure MSE ↓", "MSE", "#e07b54", log=True)
+    bar_plot(axes[0, 1], p_r2,  "Pressure R² ↑",  "R²",  "#5ba85b")
+    bar_plot(axes[1, 0], s_mse, "Shape MSE ↓",    "MSE", "#5b8dc8", log=True)
+    bar_plot(axes[1, 1], aoa,   "AoA MSE ↓",      "MSE", "#c8a85b", log=True)
 
     plt.tight_layout()
     plt.savefig(OUT_PATH, dpi=150, bbox_inches="tight")

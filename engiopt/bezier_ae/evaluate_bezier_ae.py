@@ -3,7 +3,7 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader
 
 from engiopt.bezier_ae import BezierAutoencoder, loss_reg_fn
 from engiopt.bezier_ae.plotting_bezier_ae import (
@@ -79,24 +79,14 @@ def main():
     print("Using device:", device)
 
     problem = Wings3D(seed=0)
-    base_train_dataset = problem.dataset["train"]
+    base_test_dataset = problem.dataset["test"]
 
-    coords = np.array(base_train_dataset[0]["coords"])  # convert to numpy first
+    coords = np.array(base_test_dataset[0]["coords"])  # convert to numpy first
     print("x range:", coords[:,:,0].min(), coords[:,:,0].max())
     print("y range:", coords[:,:,1].min(), coords[:,:,1].max())
-    
-    full_dataset = WingsBezierDataset(base_train_dataset)
 
-
-    train_size = int(0.9 * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    train_dataset, val_dataset = random_split(
-        full_dataset,
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(0)
-    )
-
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+    test_dataset = WingsBezierDataset(base_test_dataset)
+    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
 
     model = BezierAutoencoder(
         n_control_points=32,
@@ -112,14 +102,14 @@ def main():
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
 
-    val_loss = evaluate(model, val_loader, device, reg_fac=0.001)
-    print(f"Validation Loss: {val_loss:.6f}")
+    test_loss = evaluate(model, test_loader, device, reg_fac=0.0002)
+    print(f"Test Loss: {test_loss:.6e}")
 
     model.eval()
 
     for i in range(5):
         example_idx = i + 1
-        x = val_dataset[i].unsqueeze(0).to(device)  # [1, 2, 192]
+        x = test_dataset[i].unsqueeze(0).to(device)  # [1, 2, 192]
 
         y, pv, intvls, cp, w = model(x)
 

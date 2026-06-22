@@ -85,14 +85,20 @@ def plot_stds(stds: np.ndarray, lae_latent_dim: int, out_path: str, title: str):
     mask_active = stds_sorted >= 0.02
 
     fig, ax = plt.subplots(figsize=(10, 4))
-    colors = ["steelblue" if a else "tomato" for a in mask_active]
-    ax.bar(range(lae_latent_dim), stds_sorted, color=colors, width=0.8)
-    ax.axhline(0.02, color="red",    linestyle="--", linewidth=1.0, label="prune threshold (0.02)")
-    ax.axhline(0.05, color="orange", linestyle=":",  linewidth=1.0, label="0.05")
-    ax.set_xlabel("Latent dimension (sorted by std, descending)")
-    ax.set_ylabel("Standard deviation")
-    ax.set_title(title)
-    ax.legend()
+    colors = ["#4878a8" if a else "#b0564e" for a in mask_active]
+    ax.bar(range(lae_latent_dim), stds_sorted, color=colors, width=0.8, alpha=0.75)
+    ax.axhline(0.02, color="#333333", linestyle="--", linewidth=1.0, label=r"$\tau = 0.02$")
+    ax.set_xlabel("Latent dimension (sorted by $\\sigma$, descending)", fontsize=10)
+    ax.set_ylabel("Standard deviation $\\sigma_i$", fontsize=10)
+    ax.set_yscale("log")
+
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor="#4878a8", alpha=0.75, label=f"Active ({int(mask_active.sum())} dims)"),
+        Patch(facecolor="#b0564e", alpha=0.75, label=f"Pruned ({int((~mask_active).sum())} dims)"),
+        plt.Line2D([0], [0], color="#333333", linestyle="--", linewidth=1.0, label=r"$\tau = 0.02$"),
+    ]
+    ax.legend(handles=legend_elements, fontsize=9, framealpha=0.9)
 
     n_active = int(mask_active.sum())
     ratio    = stds_sorted[0] / stds_sorted[-1] if stds_sorted[-1] > 0 else float("inf")
@@ -101,8 +107,7 @@ def plot_stds(stds: np.ndarray, lae_latent_dim: int, out_path: str, title: str):
         f"Max: {stds_sorted[0]:.4f}  Min: {stds_sorted[-1]:.4f}  "
         f"Ratio: {ratio:.1f}×"
     )
-    ax.text(0.01, 0.97, info, transform=ax.transAxes, fontsize=9,
-            verticalalignment="top", bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5))
+    print(info)
 
     plt.tight_layout()
     plt.savefig(out_path, dpi=150)

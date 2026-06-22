@@ -138,7 +138,16 @@ def compute_metrics(generated, gt_airfoils, gen_aoas, gt_aoas,
     if gen_pressures is not None and gt_pressures is not None:
         out["pressure_mse"] = ((gen_pressures - gt_pressures) ** 2).mean().item()
     if gen_w is not None and gt_w is not None:
-        out["mmd_w"] = float(np.mean([compute_mmd(gen_w, gt_w, g) for g in GAMMAS]))
+        # w lives at a much larger scale / higher dimensionality than shape
+        # or z-space, so the fixed GAMMAS (tuned for those) underflow the
+        # Gaussian kernel to ~0 for any non-identical pair. Normalise by the
+        # pooled std and rescale gamma by 1/dim so the kernel bandwidth is
+        # comparable to the other two MMD calls.
+        pooled_std  = torch.cat([gen_w, gt_w], dim=0).std().clamp(min=1e-8)
+        gen_w_norm  = gen_w / pooled_std
+        gt_w_norm   = gt_w  / pooled_std
+        w_dim       = gen_w.shape[-1]
+        out["mmd_w"] = float(np.mean([compute_mmd(gen_w_norm, gt_w_norm, g / w_dim) for g in GAMMAS]))
     if gen_z is not None and gt_z is not None:
         out["z_bae_mse"] = ((gen_z - gt_z) ** 2).mean().item()
         out["mmd_z"] = float(np.mean([compute_mmd(gen_z, gt_z, g) for g in GAMMAS]))
@@ -366,10 +375,10 @@ def main():
         all_z.append(z_p)
         print(f"  Pass {pass_i+1}/{args.n_passes} done.")
 
-    gen_coords    = torch.stack(all_coords,    dim=0).mean(0)
-    gen_aoas      = torch.stack(all_aoas,      dim=0).mean(0)
-    gen_pressures = torch.stack(all_pressures, dim=0).mean(0)
-    gen_z         = torch.stack(all_z,         dim=0).mean(0)
+    gen_coords    = torch.stack(all_coords, dim=0).mean(0)
+    gen_aoas      = torch.stack(all_aoas,   dim=0).mean(0)
+    gen_pressures = torch.stack(all_pressures, dim=0).mean(0) if all_pressures[0] is not None else None
+    gen_z         = torch.stack(all_z,      dim=0).mean(0)
 
     # For MMD we want the full sample cloud (all passes), not the per-sample mean
     gen_w_all = torch.cat(all_w, dim=0)        # [N * n_passes, w_dim]
@@ -387,6 +396,40 @@ def main():
     for k, v in metrics.items():
         print(f"  {k}: {v:.6f}")
 
+    # ── Per-regime breakdown ─────────────────────────────────────────────────
+    machs = np.array([item["mach"] for item in test_dataset])
+    regimes = [
+        ("Subsonic   (Mach < 0.8)",  machs < 0.8),
+        ("Transonic  (0.8-1.0)   ",  (machs >= 0.8) & (machs < 1.0)),
+        ("Supersonic (Mach >= 1.0)", machs >= 1.0),
+    ]
+    regime_metrics = {}
+    print("\n── By flow regime ──────────────────────────────────────────────────")
+    for label, mask in regimes:
+        if mask.sum() == 0:
+            print(f"  {label}: no wings")
+            continue
+        idx = np.where(mask)[0]
+        # gen_w_all has N*n_passes rows — tile the mask to match
+        mask_tiled = np.tile(mask, args.n_passes)
+        idx_tiled  = np.where(mask_tiled)[0]
+        rm  = compute_metrics(
+            gen_coords[idx], gt_coords[idx],
+            gen_aoas[idx],   gt_aoas[idx],
+            gen_pressures[idx] if gen_pressures is not None else None,
+            gt_pressures[idx]  if gen_pressures is not None else None,
+            gen_w=gen_w_all[idx_tiled], gt_w=gt_w_all[idx_tiled],
+        )
+        rm.update(compute_volume_metrics(
+            gen_coords[idx], gt_coords[idx],
+            area_case_ratios[idx],
+        ))
+        regime_metrics[label.strip()] = rm
+        parts = [f"n={mask.sum():3d}"]
+        for k, v in rm.items():
+            parts.append(f"{k}={v:.4e}" if v < 0.01 else f"{k}={v:.4f}")
+        print(f"  {label}: {', '.join(parts)}")
+
     ts   = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     stem = os.path.splitext(os.path.basename(args.checkpoint))[0]
     base = os.path.join(args.out_dir, f"eval_{stem}_{ts}")
@@ -398,15 +441,16 @@ def main():
         for item in test_dataset
     ]
 
-    lvae_plotting.plot_airfoil_cp_comparison(
-        gen_coords, gt_coords,
-        gen_pressures, gt_pressures,
-        sample_indices=list(range(min(3, N))),
-        slice_indices=list(range(gt_coords.shape[1])),
-        save_path=base + "_airfoil_cp.png",
-        pred_label="DDM_W3D generated",
-        flow_conditions=flow_conditions,
-    )
+    if gen_pressures is not None:
+        lvae_plotting.plot_airfoil_cp_comparison(
+            gen_coords, gt_coords,
+            gen_pressures, gt_pressures,
+            sample_indices=list(range(min(3, N))),
+            slice_indices=list(range(gt_coords.shape[1])),
+            save_path=base + "_airfoil_cp.png",
+            pred_label="DDM_W3D generated",
+            flow_conditions=flow_conditions,
+        )
 
     lvae_plotting.plot_airfoil_slices_comparison(
         gen_coords, gt_coords,
@@ -429,14 +473,15 @@ def main():
         gen_pressures, gt_pressures,
         rec_perfs=None, gt_perfs=None,
         save_path=base + "_error_hist.png",
-    )
+    ) if gen_pressures is not None else None
 
     print(f"Plots saved to {args.out_dir}/")
 
-    metrics["checkpoint"] = args.checkpoint
-    metrics["n_passes"]   = args.n_passes
-    metrics["n_test"]     = N
-    metrics["case_nums"]  = case_nums
+    metrics["checkpoint"]    = args.checkpoint
+    metrics["n_passes"]      = args.n_passes
+    metrics["n_test"]        = N
+    metrics["case_nums"]     = case_nums
+    metrics["regime_metrics"] = regime_metrics
 
     with open(base + ".json", "w") as f:
         json.dump(metrics, f, indent=2)
@@ -448,6 +493,11 @@ def main():
         for k, v in metrics.items():
             if isinstance(v, float):
                 f.write(f"{k}: {v:.6f}\n")
+        f.write("\n── By flow regime ───────────────────────────────────────\n")
+        for label, rm in regime_metrics.items():
+            f.write(f"  {label}:\n")
+            for k, v in rm.items():
+                f.write(f"    {k}: {v:.6f}\n")
 
     print(f"Saved to {base}.json / .txt")
 

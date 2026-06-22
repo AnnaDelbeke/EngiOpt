@@ -217,7 +217,9 @@ def plot_wing_overlays(results, save_path, model_name):
             ax.set_aspect('equal')
             ax.axis('off')
             if row == 0:
-                ax.set_title(f"Slice {s_idx}", fontsize=9)
+                span_pct = {0: r"$\eta/b = 0\%$", 4: r"$\eta/b = 29\%$",
+                            8: r"$\eta/b = 57\%$", 14: r"$\eta/b = 100\%$"}
+                ax.set_title(span_pct.get(s_idx, f"Slice {s_idx}"), fontsize=9)
             if col == 0:
                 ax.set_ylabel(
                     f"{regime_labels[regime]}\nM={r['mach']:.2f}\ncase {r['case_num']}",
@@ -226,7 +228,7 @@ def plot_wing_overlays(results, save_path, model_name):
                 if gt is not None:
                     ax.legend(fontsize=7, loc='upper right')
 
-    fig.suptitle(f"{model_name} - Generated wings per initialization (overlaid)", fontsize=11)
+    fig.suptitle("")
     fig.subplots_adjust(left=0.15, right=0.98, top=0.92, bottom=0.05, hspace=0.1, wspace=0.05)
     plt.savefig(save_path, dpi=150)
     plt.close()
@@ -512,10 +514,18 @@ def main():
         chosen_inits = rng.choice(len(pool), min(args.n_inits, len(pool)), replace=False)
         init_items = [pool[i] for i in chosen_inits]
 
-        coords_list = []
-        aoas_list   = []
+        coords_list      = []
+        aoas_list        = []
+        init_coords_list = []
 
         for init_item in init_items:
+            # save the normalised init wing geometry for plotting
+            init_coords = normalise_coords(
+                torch.tensor(init_item["coords"],    dtype=torch.float32),
+                torch.tensor(init_item["te_shifts"], dtype=torch.float32),
+            )
+            init_coords_list.append(init_coords)
+
             if args.model == "ddm_w":
                 w_init_norm = encode_init_ddm_w(
                     init_item, bae_model, lvae_model, flow_lvae,
@@ -563,10 +573,11 @@ def main():
             "gt_mse_list":        gt_mse_list,
             "aoa_std":            a_std,
             "n_inits":            len(init_items),
-            "_coords_list":       coords_list,
-            "_coords_list_json":  [c.tolist() for c in coords_list],
-            "_gt_coords":         gt_coords,
-            "_gt_coords_json":    gt_coords.tolist(),
+            "_coords_list":            coords_list,
+            "_coords_list_json":       [c.tolist() for c in coords_list],
+            "_init_coords_list_json":  [c.tolist() for c in init_coords_list],
+            "_gt_coords":              gt_coords,
+            "_gt_coords_json":         gt_coords.tolist(),
         })
 
     # ── Summary ───────────────────────────────────────────────────────────────
@@ -598,7 +609,7 @@ def main():
         "overall_aoa_std":            overall_aoa,
         "per_anchor": [
             {k: v for k, v in r.items() if not k.startswith("_")}
-            | {"coords_list": r["_coords_list_json"], "gt_coords": r["_gt_coords_json"]}
+            | {"coords_list": r["_coords_list_json"], "init_coords_list": r["_init_coords_list_json"], "gt_coords": r["_gt_coords_json"]}
             for r in results
         ],
     }

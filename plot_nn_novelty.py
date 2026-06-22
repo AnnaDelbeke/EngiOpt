@@ -158,43 +158,19 @@ def plot_slice(ax, coords, color, label=None, alpha=1.0):
     ax.axis("off")
 
 
-def make_plot(gen_coords_all, nn_coords_all, out_path):
-    """
-    gen_coords_all: list of [S, 2, 192] tensors (generated)
-    nn_coords_all:  list of 3 × [S, 2, 192] tensors (nearest neighbours)
-    """
-    n = len(gen_coords_all)
-    k = 3  # neighbours
-
-    fig = plt.figure(figsize=(4 * (k + 1), 2.2 * n))
-    gs  = gridspec.GridSpec(n, k + 1, figure=fig,
-                            hspace=0.3, wspace=0.15)
-
+def make_single_plot(gen_c, nn_cs, out_path):
+    """One figure: 1 row, 4 columns (generated + 3 NNs). No labels."""
+    k = 3
     palette_nn = ["#7fbfff", "#3399ff", "#0066cc"]
     col_gen    = "#e05c00"
 
-    for row, (gen_c, nn_cs) in enumerate(zip(gen_coords_all, nn_coords_all)):
-        # Column 0: generated
-        ax = fig.add_subplot(gs[row, 0])
-        plot_slice(ax, gen_c, col_gen)
-        if row == 0:
-            ax.set_title("Generated", fontsize=9, color=col_gen, fontweight="bold")
-        # ylabel doesn't render with axis("off") — use text annotation instead
-        ax.text(-0.08, 0.5, f"#{row + 1}", transform=ax.transAxes,
-                ha="right", va="center", fontsize=8, color="#444444")
+    fig, axes = plt.subplots(1, k + 1, figsize=(4 * (k + 1), 2.2))
+    plt.subplots_adjust(wspace=0.35)
 
-        # Columns 1–3: nearest neighbours
-        for col, (nn_c, clr) in enumerate(zip(nn_cs, palette_nn), start=1):
-            ax = fig.add_subplot(gs[row, col])
-            plot_slice(ax, nn_c, clr)
-            if row == 0:
-                ax.set_title(f"NN #{col}", fontsize=9, color=clr, fontweight="bold")
+    plot_slice(axes[0], gen_c, col_gen)
+    for col, (nn_c, clr) in enumerate(zip(nn_cs, palette_nn), start=1):
+        plot_slice(axes[col], nn_c, clr)
 
-    fig.suptitle(
-        "DDM-W: generated wings and their 3 nearest training-set neighbours\n"
-        "(mid-span slice, Euclidean distance in w-space)",
-        fontsize=10, y=1.01,
-    )
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight", dpi=150)
     print(f"Saved: {out_path}")
@@ -240,35 +216,71 @@ def main():
             ddm_w.w_mean, ddm_w.w_std, scaler_params, scaler_aoas, DEVICE,
         )
 
-    # Generate 5 wings (pick spread-out test indices: 0, 20, 40, 60, 80)
-    pick = [0, 20, 40, 60, 80]
-    w_inits_pick  = w_inits[pick]
-    params_pick   = params_norm[pick]
+    # ── Quantitative NN-distance metric over all test wings ────────────────
+    # All distances computed in normalised w-space using DDM-W's own mean/std,
+    # so generated, real-test, and training encodings are all on the same scale.
+    def normalise_w(w):
+        if ddm_w.w_mean is not None:
+            return (w - ddm_w.w_mean.squeeze(0)) / ddm_w.w_std.squeeze(0)
+        return w
 
-    print("Generating …")
+    train_w_norm = normalise_w(train_w)   # [N_train, w_dim]
+    gt_w_norm    = normalise_w(gt_w)      # [N_test,  w_dim]  (raw encoder output)
+
+    print("Generating all test wings for NN-distance metric …")
+    _, gen_w_all_raw = generate_some(
+        ddm_w, w_inits, params_norm, DEVICE, n_samples=len(w_inits)
+    )
+    gen_w_all_norm = normalise_w(gen_w_all_raw)   # [N_test, w_dim]
+
+    # Mean nearest-neighbour distance: generated → training
+    dists_gen   = torch.cdist(gen_w_all_norm, train_w_norm)
+    mean_nn_gen = dists_gen.min(dim=1).values.mean().item()
+
+    # Baseline A: real test encodings → training
+    dists_gt    = torch.cdist(gt_w_norm, train_w_norm)
+    mean_nn_gt  = dists_gt.min(dim=1).values.mean().item()
+
+    # Baseline B: leave-one-out within training set
+    dists_tr = torch.cdist(train_w_norm, train_w_norm)
+    dists_tr.fill_diagonal_(float("inf"))
+    mean_nn_train = dists_tr.min(dim=1).values.mean().item()
+
+    print(f"\nNN-distance (generated  → training): {mean_nn_gen:.4f}")
+    print(f"NN-distance (test real  → training): {mean_nn_gt:.4f}")
+    print(f"NN-distance (train LOO  → training): {mean_nn_train:.4f}\n")
+
+    # ── 5-panel qualitative plot (evenly spaced test indices) ──────────────
+    pick = [0, 20, 40, 60, 80]
+    w_inits_pick = w_inits[pick]
+    params_pick  = params_norm[pick]
+
+    print("Generating 5 wings for qualitative plot …")
     gen_coords, gen_w = generate_some(
         ddm_w, w_inits_pick, params_pick, DEVICE, n_samples=len(pick)
     )
     print(f"Generated coords: {gen_coords.shape}")
 
-    # Un-normalise w for distance computation
     if ddm_w.w_mean is not None:
         gen_w_raw = gen_w * ddm_w.w_std.squeeze(0) + ddm_w.w_mean.squeeze(0)
     else:
         gen_w_raw = gen_w
 
-    # Nearest neighbours in raw w-space
-    dists = torch.cdist(gen_w_raw, train_w)  # [n_gen, N_train]
-    nn_indices = dists.argsort(dim=1)[:, :3]  # [n_gen, 3]
+    dists = torch.cdist(gen_w_raw, train_w)
+    nn_indices = dists.argsort(dim=1)[:, :3]
 
-    gen_coords_all = [gen_coords[i] for i in range(len(pick))]
-    nn_coords_all  = [
+    gen_coords_list = [gen_coords[i] for i in range(len(pick))]
+    nn_coords_list  = [
         [train_coords[nn_indices[i, k]] for k in range(3)]
         for i in range(len(pick))
     ]
 
     print("Plotting …")
-    make_plot(gen_coords_all, nn_coords_all, OUT_PATH)
+    labels = list("abcde")
+    base, ext = os.path.splitext(OUT_PATH)
+    for i, (gen_c, nn_cs, lbl) in enumerate(zip(gen_coords_list, nn_coords_list, labels)):
+        out = f"{base}_{lbl}{ext}"
+        make_single_plot(gen_c, nn_cs, out)
     print("Done.")
 
 

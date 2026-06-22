@@ -62,25 +62,32 @@ def compute_vendi(samples, gamma):
     return (-(eigenvalues * eigenvalues.log()).sum()).exp().item()
 
 
-def compute_metrics_for_pass(generated, gt_airfoils, gen_aoas, gt_aoas):
+def shoelace_area(coords):
+    """coords: [..., 2, N] -> [...] area per airfoil"""
+    x = coords[..., 0, :]
+    y = coords[..., 1, :]
+    return 0.5 * torch.abs(
+        (x * (torch.roll(y, -1, dims=-1) - torch.roll(y, 1, dims=-1))).sum(dim=-1)
+    )
+
+
+def compute_metrics_for_pass(generated, gt_airfoils, gen_aoas, gt_aoas, area_case_ratios=None):
     """
-    generated:   [N, 9, 2, 192]
-    gt_airfoils: [N, 9, 2, 192]
-    gen_aoas:    [N]
-    gt_aoas:     [N]
+    generated:        [N, 9, 2, 192]
+    gt_airfoils:      [N, 9, 2, 192]
+    gen_aoas:         [N]
+    gt_aoas:          [N]
+    area_case_ratios: [N]  volume constraint thresholds (optional)
     """
-    # Shape MSE — averaged per slice then across slices
     shape_mse = 0.0
     mmd_vals_all, vendi_gen_vals_all, vendi_gt_vals_all = [], [], []
 
     for s in range(9):
-        gen_s = generated[:, s, :, :]   # [N, 2, 192]
-        gt_s  = gt_airfoils[:, s, :, :] # [N, 2, 192]
+        gen_s = generated[:, s, :, :]
+        gt_s  = gt_airfoils[:, s, :, :]
 
-        # MSE for this slice
         shape_mse += ((gen_s - gt_s) ** 2).mean().item()
 
-        # Flatten for kernel metrics: [N, 384]
         gen_flat = gen_s.reshape(gen_s.shape[0], -1)
         gt_flat  = gt_s.reshape(gt_s.shape[0], -1)
 
@@ -94,21 +101,34 @@ def compute_metrics_for_pass(generated, gt_airfoils, gen_aoas, gt_aoas):
         vendi_gen_vals_all.append(float(np.mean(vendi_gen_slice)))
         vendi_gt_vals_all.append(float(np.mean(vendi_gt_slice)))
 
-    # Average across slices
     shape_mse /= 9
     mmd = float(np.mean(mmd_vals_all))
-    vendi_gen = float(np.mean(vendi_gen_vals_all))
+    vendi_gen_spanwise = float(np.mean(vendi_gen_vals_all))
     vendi_gt  = float(np.mean(vendi_gt_vals_all))
-    vendi_normalised = vendi_gen / vendi_gt if vendi_gt > 0 else 0.0
+    vendi_normalised = vendi_gen_spanwise / vendi_gt if vendi_gt > 0 else 0.0
 
-    # AoA MSE
+    # AoA MSE and MMD
     aoa_mse = ((gen_aoas - gt_aoas) ** 2).mean().item()
+    gen_aoa_2d = gen_aoas.unsqueeze(1)
+    gt_aoa_2d  = gt_aoas.unsqueeze(1)
+    mmd_aoa = float(np.mean([compute_mmd(gen_aoa_2d, gt_aoa_2d, g) for g in GAMMAS]))
+
+    # Volume constraint satisfaction
+    vol_constraint_sat = None
+    if area_case_ratios is not None:
+        gen_area = shoelace_area(generated).mean(dim=1)   # [N]
+        gt_area  = shoelace_area(gt_airfoils).mean(dim=1) # [N]
+        thresholds = area_case_ratios * gt_area
+        vol_constraint_sat = (gen_area >= thresholds).float().mean().item() * 100.0
 
     return {
         "shape_mse": shape_mse,
         "aoa_mse": aoa_mse,
         "mmd": mmd,
+        "mmd_aoa": mmd_aoa,
+        "vendi_spanwise": vendi_gen_spanwise,
         "vendi": vendi_normalised,
+        "vol_constraint_sat": vol_constraint_sat,
     }
 
 # ── Batched generation helper ─────────────────────────────────────────────────
@@ -233,6 +253,8 @@ def main():
     gt_aoas = []
     encoded_inits = []
     params_list = []
+    area_case_ratios_list = []
+    mach_list = []
 
     for i in range(n_test):
         item = test_dataset[i]
@@ -281,12 +303,17 @@ def main():
         gt_aoas.append(float(item["alpha"]))
         encoded_inits.append(z_init)
         params_list.append(params_scaled)
+        area_case_ratios_list.append(float(item["area_case_ratio"]))
+        mach_list.append(float(item["mach"]))
 
     gt_airfoils = torch.stack(gt_airfoils)   # [N, 9, 2, 192]
     gt_aoas_t = torch.tensor(gt_aoas)
+    area_case_ratios_t = torch.tensor(area_case_ratios_list)
+    machs = np.array(mach_list)
 
     # ── 10 forward passes (batched) ───────────────────────────────────────────
     pass_metrics = []
+    pass_arrays = []   # (gen_airfoils, gen_aoas, valid_mask) per pass
 
     for pass_idx in range(N_FORWARD_PASSES):
         print(f"Forward pass {pass_idx + 1}/{N_FORWARD_PASSES}...")
@@ -309,47 +336,101 @@ def main():
         gen_aoas_t = torch.tensor(gen_aoas)
 
         nan_mask = ~torch.isfinite(gen_airfoils_t).all(dim=(1, 2, 3))
+        valid_mask = ~nan_mask
         if nan_mask.any():
             print(f"  [WARNING] {nan_mask.sum().item()} NaN/Inf generated samples dropped before metrics")
-            valid = ~nan_mask
-            gen_airfoils_t = gen_airfoils_t[valid]
-            gen_aoas_t = gen_aoas_t[valid]
-            gt_airfoils_pass = gt_airfoils[valid]
-            gt_aoas_pass = gt_aoas_t[valid]
+            gen_airfoils_t = gen_airfoils_t[valid_mask]
+            gen_aoas_t = gen_aoas_t[valid_mask]
+            gt_airfoils_pass = gt_airfoils[valid_mask]
+            gt_aoas_pass = gt_aoas_t[valid_mask]
+            area_case_ratios_pass = area_case_ratios_t[valid_mask]
         else:
             gt_airfoils_pass = gt_airfoils
             gt_aoas_pass = gt_aoas_t
+            area_case_ratios_pass = area_case_ratios_t
 
         metrics = compute_metrics_for_pass(
-            gen_airfoils_t, gt_airfoils_pass, gen_aoas_t, gt_aoas_pass
+            gen_airfoils_t, gt_airfoils_pass, gen_aoas_t, gt_aoas_pass,
+            area_case_ratios=area_case_ratios_pass,
         )
         pass_metrics.append(metrics)
+        pass_arrays.append((gen_airfoils_t, gen_aoas_t, valid_mask.numpy()))
 
         print(
             f"  Shape MSE: {metrics['shape_mse']:.2e} | "
-            f"AoA MSE: {metrics['aoa_mse']:.3f} | "
             f"MMD: {metrics['mmd']:.4f} | "
-            f"Vendi: {metrics['vendi']:.3f}"
+            f"AoA MSE: {metrics['aoa_mse']:.3f} | "
+            f"MMD(α): {metrics['mmd_aoa']:.4f} | "
+            f"Vendi(span): {metrics['vendi_spanwise']:.2f} | "
+            f"Vendi(norm): {metrics['vendi']:.3f} | "
+            f"Vol: {metrics['vol_constraint_sat']:.2f}%"
         )
 
     # ── Aggregate results ─────────────────────────────────────────────────────
-    keys = ["shape_mse", "aoa_mse", "mmd", "vendi"]
+    keys = ["shape_mse", "mmd", "aoa_mse", "mmd_aoa", "vendi_spanwise", "vendi", "vol_constraint_sat"]
     results = {
         k: (
-            float(np.mean([m[k] for m in pass_metrics])),
-            float(np.std([m[k] for m in pass_metrics])),
+            float(np.mean([m[k] for m in pass_metrics if m[k] is not None])),
+            float(np.std( [m[k] for m in pass_metrics if m[k] is not None])),
         )
         for k in keys
     }
 
-    print("\n" + "=" * 55)
+    print("\n" + "=" * 65)
     print("EVALUATION RESULTS (mean ± std over 10 passes)")
-    print("=" * 55)
-    print(f"  Shape MSE : {results['shape_mse'][0]:.2e} ± {results['shape_mse'][1]:.2e}")
-    print(f"  AoA MSE   : {results['aoa_mse'][0]:.4f} ± {results['aoa_mse'][1]:.4f}")
-    print(f"  MMD       : {results['mmd'][0]:.4f} ± {results['mmd'][1]:.4f}")
-    print(f"  Vendi     : {results['vendi'][0]:.4f} ± {results['vendi'][1]:.4f}")
-    print("=" * 55)
+    print("=" * 65)
+    print(f"  MSE              : {results['shape_mse'][0]:.2e} ± {results['shape_mse'][1]:.2e}")
+    print(f"  MMD (Spanwise)   : {results['mmd'][0]:.4f} ± {results['mmd'][1]:.4f}")
+    print(f"  MSE (alpha)      : {results['aoa_mse'][0]:.4f} ± {results['aoa_mse'][1]:.4f}")
+    print(f"  MMD (alpha)      : {results['mmd_aoa'][0]:.4f} ± {results['mmd_aoa'][1]:.4f}")
+    print(f"  Vendi (Spanwise) : {results['vendi_spanwise'][0]:.2f} ± {results['vendi_spanwise'][1]:.2f}")
+    print(f"  Vendi (Norm.)    : {results['vendi'][0]:.4f} ± {results['vendi'][1]:.4f}")
+    print(f"  Vol. Constraint  : {results['vol_constraint_sat'][0]:.2f} ± {results['vol_constraint_sat'][1]:.2f} %")
+    print("=" * 65)
+
+    # ── Per-regime breakdown ──────────────────────────────────────────────────
+    regimes = [
+        ("Subsonic   (Mach < 0.8)",  machs < 0.8),
+        ("Transonic  (0.8-1.0)   ",  (machs >= 0.8) & (machs < 1.0)),
+        ("Supersonic (Mach >= 1.0)", machs >= 1.0),
+    ]
+    regime_metrics = {}
+    print("\n── By flow regime ──────────────────────────────────────────────────")
+    for label, regime_mask in regimes:
+        if regime_mask.sum() == 0:
+            print(f"  {label}: no wings")
+            continue
+        per_pass = []
+        for gen_a, gen_aoa, valid in pass_arrays:
+            # intersect regime mask with per-pass valid mask
+            combined = regime_mask & valid
+            if combined.sum() == 0:
+                continue
+            # index into the already-filtered gen arrays using positions within valid
+            valid_indices = np.where(valid)[0]
+            regime_in_valid = np.isin(valid_indices, np.where(combined)[0])
+            pm = compute_metrics_for_pass(
+                gen_a[regime_in_valid],
+                gt_airfoils[combined],
+                gen_aoa[regime_in_valid],
+                gt_aoas_t[combined],
+                area_case_ratios=area_case_ratios_t[combined],
+            )
+            per_pass.append(pm)
+        if not per_pass:
+            continue
+        rm = {
+            k: float(np.mean([m[k] for m in per_pass if m[k] is not None]))
+            for k in per_pass[0]
+        }
+        regime_metrics[label.strip()] = rm
+        n_regime = regime_mask.sum()
+        parts = [f"n={n_regime:3d}"]
+        for k, v in rm.items():
+            if v is None:
+                continue
+            parts.append(f"{k}={v:.4e}" if v < 0.01 else f"{k}={v:.4f}")
+        print(f"  {label}: {', '.join(parts)}")
 
     # ── Save results ──────────────────────────────────────────────────────────
     timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -372,10 +453,13 @@ def main():
         f.write(f"Gammas: {GAMMAS}\n")
         f.write(f"Batch size: {BATCH_SIZE}\n\n")
         f.write("RESULTS (mean ± std)\n")
-        f.write(f"Shape MSE : {results['shape_mse'][0]:.2e} ± {results['shape_mse'][1]:.2e}\n")
-        f.write(f"AoA MSE   : {results['aoa_mse'][0]:.4f} ± {results['aoa_mse'][1]:.4f}\n")
-        f.write(f"MMD       : {results['mmd'][0]:.4f} ± {results['mmd'][1]:.4f}\n")
-        f.write(f"Vendi     : {results['vendi'][0]:.4f} ± {results['vendi'][1]:.4f}\n")
+        f.write(f"MSE              : {results['shape_mse'][0]:.2e} ± {results['shape_mse'][1]:.2e}\n")
+        f.write(f"MMD (Spanwise)   : {results['mmd'][0]:.4f} ± {results['mmd'][1]:.4f}\n")
+        f.write(f"MSE (alpha)      : {results['aoa_mse'][0]:.4f} ± {results['aoa_mse'][1]:.4f}\n")
+        f.write(f"MMD (alpha)      : {results['mmd_aoa'][0]:.4f} ± {results['mmd_aoa'][1]:.4f}\n")
+        f.write(f"Vendi (Spanwise) : {results['vendi_spanwise'][0]:.2f} ± {results['vendi_spanwise'][1]:.2f}\n")
+        f.write(f"Vendi (Norm.)    : {results['vendi'][0]:.4f} ± {results['vendi'][1]:.4f}\n")
+        f.write(f"Vol. Constraint  : {results['vol_constraint_sat'][0]:.2f} ± {results['vol_constraint_sat'][1]:.2f} %\n")
 
     # Save JSON for aggregation script
     json_path = os.path.join(save_dir, f"eval_{label}.json")
@@ -386,6 +470,7 @@ def main():
             "seed": args.seed,
             "n_test": n_test,
             "results": {k: {"mean": v[0], "std": v[1]} for k, v in results.items()},
+            "regime_metrics": regime_metrics,
         }, f, indent=2)
 
     print(f"\nResults saved to {results_path}")

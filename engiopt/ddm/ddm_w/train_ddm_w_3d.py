@@ -231,6 +231,7 @@ def load_lvae_3d(cfg: Config, bae_model: BezierAutoencoder3D) -> LVAE3D:
     decoder_state      = ckpt.get("decoder", {})
     has_perf_head      = "perf_head.weight" in decoder_state or "perf_head.weight_orig" in decoder_state
     has_sn             = any("weight_orig" in k for k in decoder_state)
+    use_pressure       = ckpt.get("use_pressure", True)
     joint_encoder      = ckpt.get("joint_encoder", False)
     pressure_embed_dim = ckpt.get("pressure_embed_dim", 16)
 
@@ -249,7 +250,7 @@ def load_lvae_3d(cfg: Config, bae_model: BezierAutoencoder3D) -> LVAE3D:
         bae_latent_dim=bae_latent_dim, c_dim=cfg.c_dim,
         lae_latent_dim=lae_latent_dim, n_spans=n_spans,
         dropout=dropout, use_perf_head=has_perf_head,
-        spectral_norm=has_sn,
+        spectral_norm=has_sn, use_pressure=use_pressure,
     ).to(cfg.device)
 
     params_mean_std    = ckpt.get("params_mean_std")

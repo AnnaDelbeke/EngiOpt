@@ -100,6 +100,7 @@ def load_lvae_3d(checkpoint: str, device: str,
     decoder_state = ckpt.get("decoder", {})
     has_sn        = any("weight_orig" in k for k in decoder_state)
     has_perf_head = "perf_head.weight" in decoder_state or "perf_head.weight_orig" in decoder_state
+    use_pressure  = ckpt.get("use_pressure", True)
 
     if joint_encoder:
         encoder = LAEEncoderJoint3D(bae_latent_dim=bae_latent_dim, c_dim=4,
@@ -117,7 +118,8 @@ def load_lvae_3d(checkpoint: str, device: str,
                            n_spans=n_spans, dropout=dropout,
                            use_perf_head=has_perf_head,
                            span_embed_dim=span_embed_dim,
-                           spectral_norm=has_sn).to(device)
+                           spectral_norm=has_sn,
+                           use_pressure=use_pressure).to(device)
 
     model = LVAE3D(
         encoder=encoder, decoder=decoder, bae_model=bae_model,
@@ -216,7 +218,9 @@ def reconstruct_batch_3d(model: LVAE3D, bae_model: BezierAutoencoder3D,
 
     aoas_deg = model.scaler_aoas.inverse_transform(aoa_pred.cpu())
 
-    if model.scaler_pressures is not None:
+    if pressure_pred_norm is None:
+        pressure = None
+    elif model.scaler_pressures is not None:
         pressure = model.scaler_pressures.inverse_transform(pressure_pred_norm.cpu())
     else:
         pressure = pressure_pred_norm.cpu()
@@ -386,7 +390,7 @@ def main():
 
     rec_airfoils_t  = torch.cat(rec_airfoils)             # [N, S, 2, 192]
     rec_aoas_t      = torch.tensor(rec_aoas)              # [N]
-    rec_pressures_t = torch.cat(rec_pressures)            # [N, S, 192]
+    rec_pressures_t = torch.cat(rec_pressures) if rec_pressures[0] is not None else None
     rec_perfs_t     = torch.cat(rec_perfs) if rec_perfs else None  # [N, 2]
     gt_perfs_t      = torch.tensor(
         [[item["cd_val"], item["cl_val"]] for item in test_dataset], dtype=torch.float32
@@ -394,15 +398,16 @@ def main():
     w_latents_np = torch.cat(w_latents_list).numpy()      # [N, lae_latent_dim]
 
     # ── Reconstruction plots ──────────────────────────────────────────────────
-    lvae_plotting.plot_airfoil_cp_comparison(
-        rec_airfoils_t, gt_airfoils_t,
-        rec_pressures_t, gt_pressures_t,
-        sample_indices=list(range(min(3, n_test))),
-        slice_indices=list(range(gt_airfoils_t.shape[1])),
-        save_path=os.path.join(args.save_dir, f"rec_airfoil_cp_{timestamp}.png"),
-        pred_label="Reconstructed",
-        flow_conditions=flow_conditions,
-    )
+    if rec_pressures_t is not None:
+        lvae_plotting.plot_airfoil_cp_comparison(
+            rec_airfoils_t, gt_airfoils_t,
+            rec_pressures_t, gt_pressures_t,
+            sample_indices=list(range(min(3, n_test))),
+            slice_indices=list(range(gt_airfoils_t.shape[1])),
+            save_path=os.path.join(args.save_dir, f"rec_airfoil_cp_{timestamp}.png"),
+            pred_label="Reconstructed",
+            flow_conditions=flow_conditions,
+        )
 
     lvae_plotting.plot_airfoil_slices_comparison(
         rec_airfoils_t, gt_airfoils_t,
@@ -425,7 +430,7 @@ def main():
         rec_pressures_t, gt_pressures_t,
         rec_perfs=rec_perfs_t, gt_perfs=gt_perfs_t,
         save_path=os.path.join(args.save_dir, f"rec_error_hist_{timestamp}.png"),
-    )
+    ) if rec_pressures_t is not None else None
 
     # =========================================================================
     # METRIC EXPLANATIONS + COMPUTATION
@@ -463,11 +468,11 @@ def main():
     )
     geom_m     = compute_geometry_metrics(rec_airfoils_t, gt_airfoils_t,
                                           rec_aoas_t, gt_aoas_t)
-    pressure_m = compute_pressure_metrics(rec_pressures_t, gt_pressures_t)
+    pressure_m = compute_pressure_metrics(rec_pressures_t, gt_pressures_t) if rec_pressures_t is not None else None
     rec_np = rec_airfoils_t.numpy()
     gt_np  = gt_airfoils_t.numpy()
-    rec_p  = rec_pressures_t.numpy()
-    gt_p   = gt_pressures_t.numpy()
+    rec_p  = rec_pressures_t.numpy() if rec_pressures_t is not None else None
+    gt_p   = gt_pressures_t.numpy()  if rec_pressures_t is not None else None
 
     def r2_score(pred: np.ndarray, gt: np.ndarray) -> float:
         ss_res = ((pred - gt) ** 2).sum()
@@ -475,7 +480,7 @@ def main():
         return float(1.0 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
 
     shape_r2    = r2_score(rec_np, gt_np)
-    pressure_r2 = r2_score(rec_p,  gt_p)
+    pressure_r2 = r2_score(rec_p, gt_p) if rec_p is not None else float("nan")
     print(f"\n  ► Shape MSE = {geom_m['shape_mse']:.4e}")
 
     # ── Shape R² ─────────────────────────────────────────────────────────────
@@ -629,7 +634,8 @@ def main():
         bad    = "Below ~0.90 would mean the pressure predictions are significantly "
                  "wrong, which would make downstream drag/lift estimates unreliable.",
     )
-    print(f"\n  ► Pressure R² = {pressure_r2:.6f}")
+    if rec_p is not None:
+        print(f"\n  ► Pressure R² = {pressure_r2:.6f}")
 
     # =========================================================================
     # FINAL RESULTS SUMMARY
@@ -653,21 +659,25 @@ def main():
     print(f"  Latent LVAE MMD  : {latent_lvae_mmd:.4f}")
     print(f"  Latent PCA  MMD  : {latent_pca_mmd:.4f}")
     print(f"  PCA recon MSE    : {pca_recon_mse:.2e}  (n_components={n_components})")
-    print(f"  Pressure MSE     : {pressure_m['pressure_mse']:.4f}")
-    print(f"  Pressure R²      : {pressure_r2:.4f}")
-    print(f"  Pressure slice MSE (s0..s{len(pressure_m['pressure_slice_mse'])-1}): "
-          + " ".join(f"{v:.4f}" for v in pressure_m["pressure_slice_mse"]))
+    if pressure_m is not None:
+        print(f"  Pressure MSE     : {pressure_m['pressure_mse']:.4f}")
+        print(f"  Pressure R²      : {pressure_r2:.4f}")
+        print(f"  Pressure slice MSE (s0..s{len(pressure_m['pressure_slice_mse'])-1}): "
+              + " ".join(f"{v:.4f}" for v in pressure_m["pressure_slice_mse"]))
     print("── By flow regime ──────────────────────────────────────────────────")
     for label, mask in regimes:
         if mask.sum() == 0:
             print(f"  {label}: no wings")
             continue
         s_mse = float(((rec_np[mask] - gt_np[mask]) ** 2).mean())
-        p_mse = float(((rec_p[mask]  - gt_p[mask])  ** 2).mean())
         s_r2  = r2_score(rec_np[mask], gt_np[mask])
-        p_r2  = r2_score(rec_p[mask],  gt_p[mask])
-        print(f"  {label}: n={mask.sum():3d}  shape MSE={s_mse:.2e}  "
-              f"shape R²={s_r2:.4f}  pressure MSE={p_mse:.4f}  pressure R²={p_r2:.4f}")
+        if rec_p is not None:
+            p_mse = float(((rec_p[mask] - gt_p[mask]) ** 2).mean())
+            p_r2  = r2_score(rec_p[mask], gt_p[mask])
+            print(f"  {label}: n={mask.sum():3d}  shape MSE={s_mse:.2e}  "
+                  f"shape R²={s_r2:.4f}  pressure MSE={p_mse:.4f}  pressure R²={p_r2:.4f}")
+        else:
+            print(f"  {label}: n={mask.sum():3d}  shape MSE={s_mse:.2e}  shape R²={s_r2:.4f}")
     print("=" * 70)
 
     # ── Markdown comparison table ─────────────────────────────────────────────
@@ -682,8 +692,8 @@ def main():
 | Shape MSE | {geom_m['shape_mse']:.4e} | {pca_recon_mse:.4e} | PCA (by construction) |
 | Shape R² | {shape_r2:.4f} | N/A | LVAE (joint model) |
 | Coord-Space MMD | {geom_m['mmd']:.4f} | N/A | LVAE |
-| Pressure MSE | {pressure_m['pressure_mse']:.4f} | N/A (not encoded) | LVAE |
-| Pressure R² | {pressure_r2:.4f} | N/A (not encoded) | LVAE |
+| Pressure MSE | {f"{pressure_m['pressure_mse']:.4f}" if pressure_m is not None else 'N/A'} | N/A (not encoded) | LVAE |
+| Pressure R² | {f"{pressure_r2:.4f}" if rec_p is not None else 'N/A'} | N/A (not encoded) | LVAE |
 
 ### Latent Space
 
@@ -698,7 +708,7 @@ def main():
 PCA achieves lower coordinate MSE by construction (it minimises reconstruction error),
 but encodes **geometry only** and produces a **fractured latent topology** incompatible
 with diffusion-model sampling. The LVAE trades a ~3.4× increase in shape MSE for a
-joint latent space that encodes pressure (R²={pressure_r2:.4f}), stays embedded within
+joint latent space that encodes pressure (R²={f"{pressure_r2:.4f}" if rec_p is not None else 'N/A'}), stays embedded within
 the N(0,I) prior (latent MMD={latent_lvae_mmd:.4f} vs PCA {latent_pca_mmd:.4f}), and
 supports smooth navigation by the downstream DDM-W.
 """
@@ -718,22 +728,26 @@ supports smooth navigation by the downstream DDM-W.
         f.write(f"{'latent_lvae_mmd':16s}: {latent_lvae_mmd:.6f}\n")
         f.write(f"{'latent_pca_mmd':16s}: {latent_pca_mmd:.6f}\n")
         f.write(f"{'pca_recon_mse':16s}: {pca_recon_mse:.6f}  (n_components={n_components})\n")
-        f.write(f"{'pressure_mse':16s}: {pressure_m['pressure_mse']:.6f}\n")
-        f.write(f"{'pressure_r2':16s}: {pressure_r2:.6f}\n")
-        f.write("Pressure slice MSE:\n")
-        for s, v in enumerate(pressure_m["pressure_slice_mse"]):
-            f.write(f"  slice {s}: {v:.6f}\n")
+        if pressure_m is not None:
+            f.write(f"{'pressure_mse':16s}: {pressure_m['pressure_mse']:.6f}\n")
+            f.write(f"{'pressure_r2':16s}: {pressure_r2:.6f}\n")
+            f.write("Pressure slice MSE:\n")
+            for s, v in enumerate(pressure_m["pressure_slice_mse"]):
+                f.write(f"  slice {s}: {v:.6f}\n")
         f.write("\n── By flow regime ───────────────────────────────────────\n")
         for label, mask in regimes:
             if mask.sum() == 0:
                 f.write(f"  {label}: no wings\n")
                 continue
             s_mse = float(((rec_np[mask] - gt_np[mask]) ** 2).mean())
-            p_mse = float(((rec_p[mask]  - gt_p[mask])  ** 2).mean())
             s_r2  = r2_score(rec_np[mask], gt_np[mask])
-            p_r2  = r2_score(rec_p[mask],  gt_p[mask])
-            f.write(f"  {label}: n={mask.sum():3d}  shape MSE={s_mse:.6f}  "
-                    f"shape R²={s_r2:.6f}  pressure MSE={p_mse:.6f}  pressure R²={p_r2:.6f}\n")
+            if rec_p is not None:
+                p_mse = float(((rec_p[mask] - gt_p[mask]) ** 2).mean())
+                p_r2  = r2_score(rec_p[mask], gt_p[mask])
+                f.write(f"  {label}: n={mask.sum():3d}  shape MSE={s_mse:.6f}  "
+                        f"shape R²={s_r2:.6f}  pressure MSE={p_mse:.6f}  pressure R²={p_r2:.6f}\n")
+            else:
+                f.write(f"  {label}: n={mask.sum():3d}  shape MSE={s_mse:.6f}  shape R²={s_r2:.6f}\n")
         f.write("\n" + md)
 
     print(f"\nResults saved to {results_path}")

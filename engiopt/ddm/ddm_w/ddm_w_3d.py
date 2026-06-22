@@ -61,6 +61,13 @@ class DDM_W3D(DDM_W):
                 # LVAE3D decoder: returns (z_bae_pred, aoa, eta_y, pressure, None)
                 _, _, _, pressure_pred, _ = self.lvae_model.decoder(w0_masked, lvae_params)
 
+            if pressure_pred is None:
+                loss_p = torch.tensor(0.0, device=device)
+                total = loss_w + self.w_aoa * loss_aoa + self.w_pressure * loss_p
+                if return_components:
+                    return total, loss_w, loss_aoa, loss_p
+                return total
+
             lvae_ps = getattr(self.lvae_model, 'scaler_pressures', None)
             if lvae_ps is not None:
                 p_mean = torch.tensor(float(lvae_ps.mean), device=device)
@@ -171,15 +178,18 @@ class DDM_W3D(DDM_W):
         else:
             aoas = aoa_pred_from_w.squeeze(1)
 
-        # Denormalise pressure
-        lvae_ps = getattr(self.lvae_model, 'scaler_pressures', None)
-        if lvae_ps is not None:
-            p_mean = torch.tensor(float(lvae_ps.mean), device=device)
-            p_std  = torch.tensor(float(lvae_ps.std),  device=device)
-            pressures = pressure_pred * p_std + p_mean
+        # Denormalise pressure (None when LVAE was trained without pressure head)
+        if pressure_pred is None:
+            pressures = None
         else:
-            pressures = pressure_pred
+            lvae_ps = getattr(self.lvae_model, 'scaler_pressures', None)
+            if lvae_ps is not None:
+                p_mean = torch.tensor(float(lvae_ps.mean), device=device)
+                p_std  = torch.tensor(float(lvae_ps.std),  device=device)
+                pressures = pressure_pred * p_std + p_mean
+            else:
+                pressures = pressure_pred
 
         te_shifts = eta_y_pred.squeeze(-1)   # [B, S]
 
-        return coords.cpu(), aoas.cpu(), pressures.cpu(), te_shifts.cpu(), w_raw.cpu(), z_bae_pred.cpu()
+        return coords.cpu(), aoas.cpu(), pressures.cpu() if pressures is not None else None, te_shifts.cpu(), w_raw.cpu(), z_bae_pred.cpu()

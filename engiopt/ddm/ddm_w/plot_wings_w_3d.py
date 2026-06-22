@@ -98,7 +98,7 @@ def main():
     initial_by_case = {item["case_num"]: item for item in all_test if item["initial"] == 1}
     test_dataset    = [item for item in all_test if item["final"] == 1]
 
-    gt_coords, gt_aoas, gt_pressures, _, w_inits, params_norm, case_nums = \
+    gt_coords, gt_aoas, gt_pressures, _, _, w_inits, params_norm, case_nums = \
         precompute_test_3d(
             test_dataset, initial_by_case, bae_model, lvae_model,
             w_mean, w_std, scaler_params, scaler_aoas, device,
@@ -108,7 +108,7 @@ def main():
     n_wings = min(args.n_wings, n_test)
     print(f"Test set: {n_test} wings, plotting {n_wings}")
 
-    gen_coords, gen_aoas, gen_pressures, _, _ = ddm_w.generate(
+    gen_coords, gen_aoas, gen_pressures, _, _, _ = ddm_w.generate(
         w_init=w_inits[:n_wings].to(device),
         params=params_norm[:n_wings].to(device),
         device=device,

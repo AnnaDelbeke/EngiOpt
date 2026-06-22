@@ -216,6 +216,9 @@ def parse_args():
     p.add_argument("--w_aoa",          type=float, default=1.0)
     p.add_argument("--grad_clip",      type=float, default=1.0)
     p.add_argument("--lr",             type=float, default=1e-4)
+    p.add_argument("--n_samples",      type=int, default=0,
+                   help="Subsample training set to this many wings (0 = use all)")
+    p.add_argument("--save_dir",       type=str, default=None)
     p.add_argument("--wandb",          action="store_true")
     p.add_argument("--wandb_project",  type=str, default="engiopt-ddm-pca-3d")
     return p.parse_args()
@@ -232,6 +235,7 @@ def main():
     cfg.lr             = args.lr
     if args.model_name is not None: cfg.model_name = args.model_name
     if args.n_epochs   is not None: cfg.n_epochs   = args.n_epochs
+    if args.save_dir   is not None: cfg.save_dir   = args.save_dir
 
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -254,6 +258,11 @@ def main():
     all_val             = list(new_dataset["val"])
     val_initial_by_case = {item["case_num"]: item for item in all_val if item["initial"] == 1}
     val_dataset         = [item for item in all_val if item["final"]   == 1]
+
+    if args.n_samples > 0:
+        rng = np.random.default_rng(cfg.seed)
+        idx = rng.choice(len(base_dataset), size=min(args.n_samples, len(base_dataset)), replace=False)
+        base_dataset = [base_dataset[i] for i in sorted(idx)]
 
     print(f"Train: {len(base_dataset)},  Val: {len(val_dataset)}")
 

@@ -35,6 +35,10 @@ from engiopt.data_processing.new_dataset_adapter import NewWingsDataset
 _SLICES_PKL  = "Wing_TL/data/processed/new_dataset_slices.pkl"
 _SCALARS_PKL = "Wing_TL/data/processed/new_dataset_scalars.pkl"
 
+# True span-to-chord ratio (span tip ~= 2.505 m, chord normalised to 1) so the
+# 3D wing renders are not visually squashed into a cube.
+_SPAN_CHORD_RATIO = 2.505
+
 plt.rcParams.update({
     "font.family":    "serif",
     "font.size":      10,
@@ -62,7 +66,7 @@ def _save(fig, save_dir, scratch, stem, exts=("pdf", "png")):
 
 # ── shared surface drawing helper ─────────────────────────────────────────────
 
-def _draw_surface(ax, data: np.ndarray, title: str):
+def _draw_surface(ax, data: np.ndarray, title: str | None = None):
     """Draw a surface mesh on ax. Returns the surface artist."""
     S, _, N = data.shape
     span_pos = np.linspace(0.0, 1.0, S)
@@ -91,10 +95,14 @@ def _draw_surface(ax, data: np.ndarray, title: str):
     ax.set_xlabel("x/c", labelpad=6)
     ax.set_ylabel("Span η", labelpad=6)
     ax.set_zlabel("y/c", labelpad=6)
-    ax.set_title(title, pad=10)
-    ax.set_xlim(-0.05, 1.05)
-    ax.set_zlim(-0.18, 0.18)
-    ax.set_ylim(0, 1)
+    if title:
+        ax.set_title(title, pad=10)
+    # Use equal data ranges on all three axes so the wing is not distorted.
+    # Chord x/c spans 1.1; pad span and thickness to the same range.
+    ax.set_xlim(-0.05, 1.05)          # range = 1.1
+    ax.set_ylim(-0.05, 1.05)          # range = 1.1 (span, centred on [0,1])
+    ax.set_zlim(-0.55, 0.55)          # range = 1.1 (thickness, centred on 0)
+    ax.set_box_aspect([1, _SPAN_CHORD_RATIO, 1])
     ax.view_init(elev=22, azim=-55)
     ax.xaxis.pane.fill = False
     ax.yaxis.pane.fill = False
@@ -138,8 +146,10 @@ def plot_exploded_view(recon: np.ndarray, save_dir: str, scratch: str, stem: str
     ax.set_xlabel("x/c", labelpad=6)
     ax.set_ylabel("Span η", labelpad=6)
     ax.set_zlabel("y/c", labelpad=6)
-    ax.set_title("3D BAE — Exploded Spanwise Slice View", pad=10)
-    ax.set_xlim(-0.05, 1.05);  ax.set_zlim(-0.18, 0.18);  ax.set_ylim(0, 1)
+    ax.set_xlim(-0.05, 1.05)
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_zlim(-0.55, 0.55)
+    ax.set_box_aspect([1, _SPAN_CHORD_RATIO, 1])
     ax.view_init(elev=22, azim=-55)
     ax.xaxis.pane.fill = False
     ax.yaxis.pane.fill = False
@@ -155,7 +165,7 @@ def plot_exploded_view(recon: np.ndarray, save_dir: str, scratch: str, stem: str
 def plot_surface_mesh(recon: np.ndarray, save_dir: str, scratch: str, stem: str = "bae3d_surface_mesh"):
     fig = plt.figure(figsize=(10, 5))
     ax  = fig.add_subplot(111, projection="3d")
-    surf = _draw_surface(ax, recon, "3D BAE — Reconstructed Wing Surface")
+    surf = _draw_surface(ax, recon)
     fig.colorbar(surf, ax=ax, shrink=0.45, pad=0.08, aspect=20,
                  label="y/c  (surface height)")
     _save(fig, save_dir, scratch, stem)
@@ -166,17 +176,17 @@ def plot_surface_mesh(recon: np.ndarray, save_dir: str, scratch: str, stem: str 
 
 def plot_gt_vs_recon(gt: np.ndarray, recon: np.ndarray,
                      save_dir: str, scratch: str, stem: str = "bae3d_gt_vs_recon"):
-    fig = plt.figure(figsize=(16, 5))
-    ax_gt    = fig.add_subplot(121, projection="3d")
-    ax_recon = fig.add_subplot(122, projection="3d")
-    surf_gt  = _draw_surface(ax_gt,    gt,    "Ground Truth")
-    _draw_surface(ax_recon, recon, "BAE Reconstruction")
-    fig.colorbar(surf_gt, ax=[ax_gt, ax_recon], shrink=0.5, pad=0.04,
-                 aspect=25, label="y/c  (surface height)")
-    fig.suptitle("3D BAE — Ground Truth vs. Reconstruction",
-                 fontsize=12, y=1.01)
-    _save(fig, save_dir, scratch, stem)
-    plt.close()
+    """Saves GT and reconstruction as two separate untitled images, so the
+    thesis can caption them as (a)/(b) subfigures in LaTeX instead of baking
+    titles into the matplotlib figure."""
+    for suffix, data in (("gt", gt), ("recon", recon)):
+        fig = plt.figure(figsize=(8, 5))
+        ax = fig.add_subplot(111, projection="3d")
+        surf = _draw_surface(ax, data)
+        fig.colorbar(surf, ax=ax, shrink=0.5, pad=0.08, aspect=20,
+                     label="y/c  (surface height)")
+        _save(fig, save_dir, scratch, f"{stem}_{suffix}")
+        plt.close(fig)
 
 
 # ── GIFs: 360° rotating views ─────────────────────────────────────────────────
@@ -194,7 +204,7 @@ def plot_rotating_gifs(gt: np.ndarray, recon: np.ndarray,
     # GIF 1 — reconstruction only
     fig1 = plt.figure(figsize=(6, 4))
     ax1  = fig1.add_subplot(111, projection="3d")
-    surf1 = _draw_surface(ax1, recon, "3D BAE — Reconstructed Wing Surface")
+    surf1 = _draw_surface(ax1, recon)
     fig1.colorbar(surf1, ax=ax1, shrink=0.45, pad=0.08, aspect=20,
                   label="y/c  (surface height)")
 
@@ -242,7 +252,12 @@ def parse_args():
     p.add_argument("--checkpoint",
                    default="results/bezier_ae_3d/run_039/models/bezier_ae_3d_best.pt")
     p.add_argument("--run_dir", default="results/bezier_ae_3d/run_039")
-    p.add_argument("--wing_indices", type=int, nargs="+", default=[0, 1, 2, 3, 4])
+    p.add_argument("--wing_indices", type=int, nargs="+", default=None)
+    p.add_argument("--case_nums", type=int, nargs="+", default=None,
+                   help="Plot these case numbers (looked up in the val set). "
+                        "If both --wing_indices and --case_nums are given, they are combined.")
+    p.add_argument("--slices_pkl",  default=_SLICES_PKL)
+    p.add_argument("--scalars_pkl", default=_SCALARS_PKL)
     return p.parse_args()
 
 
@@ -253,17 +268,33 @@ def main():
     save_dir = os.path.join(args.run_dir, "reconstructions_thesis")
     scratch  = "/cluster/scratch/adelbeke/thesis_figures"
 
-    new_dataset  = NewWingsDataset(_SLICES_PKL, _SCALARS_PKL, seed=0)
+    new_dataset  = NewWingsDataset(args.slices_pkl, args.scalars_pkl, seed=0)
     all_items    = [item for item in list(new_dataset["train"]) + list(new_dataset["val"])
                     if item["final"] == 1]
+    all_case_nums = [item["case_num"] for item in all_items]
     full_dataset = WingsBezierDataset3D(all_items, num_extra_tip_slices=0)
     train_size   = int(0.9 * len(full_dataset))
     val_size     = len(full_dataset) - train_size
+    generator    = torch.Generator().manual_seed(0)
     _, val_dataset = random_split(
-        full_dataset, [train_size, val_size],
-        generator=torch.Generator().manual_seed(0),
+        full_dataset, [train_size, val_size], generator=generator,
     )
+    val_case_nums = [all_case_nums[i] for i in val_dataset.indices]
     print(f"Validation wings: {len(val_dataset)}")
+
+    # Resolve indices from --case_nums
+    indices = list(args.wing_indices) if args.wing_indices else []
+    if args.case_nums:
+        for cn in args.case_nums:
+            if cn in val_case_nums:
+                indices.append(val_case_nums.index(cn))
+            else:
+                print(f"WARNING: case {cn} not found in val set — skipping")
+    if not indices:
+        indices = [0, 1, 2, 3, 4]
+    # Deduplicate while preserving order
+    seen = set()
+    indices = [i for i in indices if not (i in seen or seen.add(i))]
 
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
     model = BezierAutoencoder3D(
@@ -280,8 +311,9 @@ def main():
     model.eval()
     print(f"Loaded checkpoint (latent_dim={ckpt['latent_dim']}, n_spans={ckpt['n_spans']})")
 
-    for wing_idx in args.wing_indices:
-        print(f"\n── Wing {wing_idx} ──")
+    for wing_idx in indices:
+        case_num = val_case_nums[wing_idx]
+        print(f"\n── Wing {wing_idx}  (case {case_num}) ──")
         with torch.no_grad():
             x = val_dataset[wing_idx].unsqueeze(0).to(device)
             z = model.encode(x)
@@ -291,7 +323,7 @@ def main():
         recon = y.squeeze(0).cpu().numpy()
         print(f"  shape {recon.shape}")
 
-        sfx = f"_wing{wing_idx:02d}"
+        sfx = f"_case{case_num:05d}"
         plot_exploded_view(recon, save_dir, scratch, stem=f"bae3d_exploded_view{sfx}")
         plot_surface_mesh(recon, save_dir, scratch, stem=f"bae3d_surface_mesh{sfx}")
         plot_gt_vs_recon(gt, recon, save_dir, scratch, stem=f"bae3d_gt_vs_recon{sfx}")
