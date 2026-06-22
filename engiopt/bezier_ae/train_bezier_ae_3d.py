@@ -255,19 +255,13 @@ def main():
     print(f"Outputs → {run_dir}")
 
     new_dataset  = NewWingsDataset(args.slices_pkl, args.scalars_pkl, seed=0)
-    all_items    = [item for item in list(new_dataset["train"]) + list(new_dataset["val"])
-                    if item["final"] == 1]
-    full_dataset = WingsBezierDataset3D(all_items)
-    print(f"Total wings: {len(full_dataset)}")
+    train_items  = [item for item in list(new_dataset["train"]) if item["final"] == 1]
+    val_items    = [item for item in list(new_dataset["val"])   if item["final"] == 1]
+    train_ds     = WingsBezierDataset3D(train_items)
+    val_ds       = WingsBezierDataset3D(val_items)
+    print(f"Train wings: {len(train_ds)}  Val wings: {len(val_ds)}")
 
-    train_size = int(0.9 * len(full_dataset))
-    val_size   = len(full_dataset) - train_size
-    train_ds, val_ds = random_split(
-        full_dataset, [train_size, val_size],
-        generator=torch.Generator().manual_seed(0),
-    )
-
-    n_spans = full_dataset[0].shape[0]
+    n_spans = train_ds[0].shape[0]
 
     train_one_config(
         train_ds, val_ds, n_spans,

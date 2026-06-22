@@ -148,15 +148,8 @@ def main():
     # Dataset (same split as training)
     print(f"Dataset: {args.slices_pkl}")
     new_dataset  = NewWingsDataset(args.slices_pkl, _SCALARS_PKL, seed=0)
-    all_items    = [item for item in list(new_dataset["train"]) + list(new_dataset["val"])
-                    if item["final"] == 1]
-    full_dataset = WingsBezierDataset3D(all_items)
-    train_size = int(0.9 * len(full_dataset))
-    val_size   = len(full_dataset) - train_size
-    _, val_dataset = random_split(
-        full_dataset, [train_size, val_size],
-        generator=torch.Generator().manual_seed(0),
-    )
+    val_items    = [item for item in list(new_dataset["val"]) if item["final"] == 1]
+    val_dataset  = WingsBezierDataset3D(val_items)
     print(f"Val wings: {len(val_dataset)}")
 
     # Load model
