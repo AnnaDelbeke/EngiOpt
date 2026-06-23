@@ -170,7 +170,7 @@ def plot_one_dim(model, bae_model, ref_items, regime_labels, device,
     row_sep  = 0.35   # vertical gap between regime rows
     cbar_w   = 0.18   # vertical colorbar width
     cbar_gap = 0.12   # gap between plot area and colorbar
-    margin_l = 0.72   # left margin for regime label
+    margin_l = 0.90   # left margin for regime label
     margin_r = cbar_gap + cbar_w + 0.25
     margin_t = 0.25   # top margin
     margin_b = 0.55   # bottom margin (x-labels)
@@ -202,7 +202,7 @@ def plot_one_dim(model, bae_model, ref_items, regime_labels, device,
             (margin_l - 0.05) / fig_w,
             1.0 - (row_top_in + af_h_in * 0.5) / fig_h,
             rlabel,
-            ha="right", va="center", fontsize=8, fontweight="bold",
+            ha="right", va="center", fontsize=11, fontweight="bold",
         )
 
         # ── per-step columns ──────────────────────────────────────────────────
@@ -252,16 +252,16 @@ def plot_one_dim(model, bae_model, ref_items, regime_labels, device,
 
             ax_cp.set_xlim(-0.05, 1.05)
             ax_cp.set_ylim(*cp_ylim)
-            ax_cp.tick_params(labelsize=6, length=2, pad=1)
+            ax_cp.tick_params(labelsize=9, length=2, pad=1)
 
             is_last_row = (row_i == n_regimes - 1)
             if is_last_row:
-                ax_cp.set_xlabel("x/c", fontsize=7, labelpad=2)
+                ax_cp.set_xlabel("x/c", fontsize=10, labelpad=2)
             else:
                 ax_cp.set_xticklabels([])
 
             if col_i == 0:
-                ax_cp.set_ylabel("$C_p$", fontsize=8, labelpad=2)
+                ax_cp.set_ylabel("$C_p$", fontsize=10, labelpad=2)
             else:
                 ax_cp.set_yticklabels([])
 
@@ -278,7 +278,7 @@ def plot_one_dim(model, bae_model, ref_items, regime_labels, device,
     cb = fig.colorbar(sm, cax=cbar_ax)
     cb.set_ticks([-n_sigma, 0, n_sigma])
     cb.set_ticklabels([f"$-{n_sigma:.0f}\\sigma$", "$0$", f"$+{n_sigma:.0f}\\sigma$"])
-    cb.ax.tick_params(labelsize=8)
+    cb.ax.tick_params(labelsize=10)
 
     os.makedirs(os.path.dirname(save_stem) or ".", exist_ok=True)
     for ext in ("pdf", "png"):
@@ -305,7 +305,7 @@ def _plot_single_dim(coords_t, pressure_t, dim_idx, cp_ylim,
             "height_ratios": [1.0, 2.5],
             "width_ratios":  [1.0] * n_steps + [0.08],
             "hspace": 0.0,
-            "wspace": 0.06,
+            "wspace": 0.18,
         },
     )
 
@@ -335,7 +335,9 @@ def _plot_single_dim(coords_t, pressure_t, dim_idx, cp_ylim,
             idx_s = np.argsort(x_pts[surf_mask])
             ax_cp.plot(x_pts[surf_mask][idx_s], cp[surf_mask][idx_s],
                        color=color, lw=1.0, linestyle=ls)
-        ax_cp.set_xlim(-0.02, 1.02)
+        ax_cp.set_xlim(-0.05, 1.05)
+        ax_cp.set_xticks([0, 0.5, 1])
+        ax_cp.set_xticklabels(["0", "0.5", "1"])
         ax_cp.set_ylim(*cp_ylim)
         ax_cp.tick_params(labelsize=11, length=3, pad=2)
         for sp in ["top", "right"]:
