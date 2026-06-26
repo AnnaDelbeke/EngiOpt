@@ -358,6 +358,9 @@ def parse_args():
     p.add_argument("--hidden_dims", type=int, nargs="+", default=None)
     p.add_argument("--dropout",     type=float, default=0.0)
     p.add_argument("--seed",        type=int, default=0)
+    p.add_argument("--n_samples",   type=int, default=0,
+                   help="If > 0, subsample this many training wings (for ablation).")
+    p.add_argument("--save_dir",    type=str, default=None)
     p.add_argument("--wandb",       action="store_true")
     p.add_argument("--wandb_project", type=str, default="engiopt-ddm-3d")
     return p.parse_args()
@@ -377,6 +380,7 @@ def main():
     if args.model_name  is not None: cfg.model_name = args.model_name
     if args.n_epochs    is not None: cfg.n_epochs   = args.n_epochs
     if args.hidden_dims is not None: cfg.hidden_dims = tuple(args.hidden_dims)
+    if args.save_dir    is not None: cfg.save_dir   = args.save_dir
 
     torch.manual_seed(cfg.seed)
     os.makedirs(cfg.save_dir, exist_ok=True)
@@ -391,6 +395,10 @@ def main():
     all_train       = list(new_dataset["train"])
     initial_by_case = {item["case_num"]: item for item in all_train if item["initial"] == 1}
     base_dataset    = [item for item in all_train if item["final"] == 1]
+    if args.n_samples > 0:
+        rng = np.random.default_rng(cfg.seed)
+        idx = rng.choice(len(base_dataset), size=min(args.n_samples, len(base_dataset)), replace=False)
+        base_dataset = [base_dataset[i] for i in idx]
     all_val             = list(new_dataset["val"])
     val_initial_by_case = {item["case_num"]: item for item in all_val if item["initial"] == 1}
     val_dataset         = [item for item in all_val if item["final"] == 1]
