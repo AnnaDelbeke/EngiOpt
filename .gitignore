@@ -172,3 +172,4 @@ logs/*
 .ruff_cache/
 engibench_studies/*
 results/sensitivity_3d/*.json
+thesis/
